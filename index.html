@@ -16,7 +16,6 @@
         import { getAuth, signInWithRedirect, getRedirectResult, signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // 新しく作成したFirebaseプロジェクトの設定
         const firebaseConfig = {
             apiKey: "AIzaSyBHjBXbPCD1Q7_xT7mu7eIjEimIKxQzxrs",
             authDomain: "fire-board-b1a21.firebaseapp.com",
@@ -60,11 +59,11 @@
                             photoURL: user.photoURL || ''
                         };
                         window.myCreatorId = user.uid;
-                        window.isViewOnlyMode = false;
+                        window.isViewOnlyMode = false; // 閲覧モードを強制解除
 
                         recordLoginSession(window.currentUser);
                         updateUserIconUI();
-                        closeLoginModal();
+                        closeLoginModal(); // モーダルを確実に閉じる
                         if (typeof renderNotes === 'function') renderNotes();
                     } else {
                         window.currentUser = null;
@@ -135,7 +134,6 @@
             }
             try {
                 const provider = new GoogleAuthProvider();
-                // iPad / モバイルSafariで真っ白になるのを防ぐため、iPad/iPhone/Safari判定時はリダイレクトを使用
                 const isMobileOrSafari = /iPad|iPhone|iPod/.test(navigator.userAgent) || 
                                          (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1) ||
                                          (/^((?!chrome|android).)*safari/i.test(navigator.userAgent));
@@ -147,7 +145,6 @@
                 }
             } catch (e) {
                 console.error("Google Login failed:", e);
-                // ポップアップ失敗時はリダイレクトにフォールバック
                 try {
                     const provider = new GoogleAuthProvider();
                     await signInWithRedirect(auth, provider);
@@ -816,7 +813,6 @@
                     };
                 }
 
-                // 閲覧専用モード（未ログイン）の場合は自分の付箋でも編集・削除ボタンを表示しない
                 const isLoggedIn = Boolean(window.currentUser);
                 const isMyNote = (isLoggedIn && note.creatorId === window.myCreatorId) || window.isAdminMode;
                 
@@ -972,7 +968,6 @@
             closeModalById('login-modal');
         }
 
-        // プラスボタンを押したときの挙動：未ログインならログインモーダルを開く
         function handlePlusClick() {
             if (!window.currentUser) {
                 openLoginModal(true);
@@ -1089,7 +1084,6 @@
             const note = window.notesData.find(n => n.id === id);
             if (!note) return;
 
-            // 未ログイン（閲覧モード）では移動不可
             const canMove = (Boolean(window.currentUser) && note.creatorId === window.myCreatorId) || window.isAdminMode;
 
             if (!canMove) {
@@ -1299,3 +1293,4 @@
     </script>
 </body>
 </html>
+```[cite: 1]
