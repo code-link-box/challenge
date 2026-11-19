@@ -35,6 +35,7 @@
         window.isAdminMode = (window.location.hash === '#admin-administrator-()');
         window.notesData = [];
         window.usersData = [];
+        window.auditLogsData = [];
         window.currentUser = null;
         window.loginSessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
 
@@ -102,9 +103,59 @@
                     console.warn("Users sync warning:", error);
                 });
 
+                // 編集・削除・作成履歴のリアルタイム同期
+                const logsColRef = collection(db, 'artifacts', appId, 'public', 'data', 'audit_logs');
+                onSnapshot(logsColRef, (snapshot) => {
+                    const logs = [];
+                    snapshot.forEach(docSnap => {
+                        logs.push({ id: docSnap.id, ...docSnap.data() });
+                    });
+                    logs.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
+                    window.auditLogsData = logs;
+                    if (typeof renderHistoryList === 'function') renderHistoryList();
+                }, (error) => {
+                    console.warn("Audit logs sync warning:", error);
+                });
+
             } catch (e) {
                 console.warn("Firebase connection failed, falling back to local:", e);
                 fallbackToLocal();
+            }
+        };
+
+        window.recordAuditLog = async function(actionType, noteObj, beforeNoteObj = null) {
+            const now = new Date().toISOString();
+            const actorName = window.currentUser ? window.currentUser.displayName : '不明';
+            const actorEmail = window.currentUser ? window.currentUser.email : '';
+            const actorUid = window.currentUser ? window.currentUser.uid : (window.myCreatorId || '');
+
+            const logEntry = {
+                id: 'log_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+                action: actionType, // 'create' | 'edit' | 'delete' | 'restore'
+                noteId: noteObj ? noteObj.id : '',
+                actorName: actorName,
+                actorEmail: actorEmail,
+                actorUid: actorUid,
+                timestamp: now,
+                noteSnapshot: noteObj ? JSON.parse(JSON.stringify(noteObj)) : null,
+                beforeSnapshot: beforeNoteObj ? JSON.parse(JSON.stringify(beforeNoteObj)) : null
+            };
+
+            const localLogs = JSON.parse(localStorage.getItem('freeboard_local_logs') || '[]');
+            localLogs.unshift(logEntry);
+            localStorage.setItem('freeboard_local_logs', JSON.stringify(localLogs.slice(0, 200)));
+
+            if (!isFirebaseConnected || !db) {
+                window.auditLogsData = localLogs;
+                if (typeof renderHistoryList === 'function') renderHistoryList();
+            }
+
+            if (isFirebaseConnected && db) {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'audit_logs', logEntry.id), logEntry);
+                } catch (e) {
+                    console.warn("Failed to save audit log:", e);
+                }
             }
         };
 
@@ -121,7 +172,6 @@
                 lastActiveAt: now
             };
 
-            // ローカルセッションも更新
             const sessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
             const idx = sessions.findIndex(s => s.uid === user.uid);
             if (idx >= 0) {
@@ -168,7 +218,6 @@
             closeLoginModal();
         }
 
-        // タブの表示・非表示やページ離脱時のオンライン状態更新
         document.addEventListener('visibilitychange', () => {
             if (window.currentUser) {
                 syncUserPresence(window.currentUser, document.visibilityState === 'visible');
@@ -233,6 +282,8 @@
             updateConnectionIndicator(false);
             const saved = localStorage.getItem('freeboard_local_notes');
             window.notesData = saved ? JSON.parse(saved) : [];
+            const savedLogs = localStorage.getItem('freeboard_local_logs');
+            window.auditLogsData = savedLogs ? JSON.parse(savedLogs) : [];
             
             if (!window.currentUser) {
                 openLoginModal();
@@ -241,6 +292,7 @@
             if (typeof renderNotes === 'function') renderNotes();
             if (typeof renderSearchList === 'function') renderSearchList();
             if (typeof renderAccountLists === 'function') renderAccountLists();
+            if (typeof renderHistoryList === 'function') renderHistoryList();
         }
 
         function updateConnectionIndicator(isConnected) {
@@ -262,6 +314,7 @@
             if (!container) return;
 
             if (window.currentUser) {
+                container.classList.remove('hidden');
                 const avatar = window.currentUser.photoURL ? 
                     `<img src="${window.currentUser.photoURL}" class="w-10 h-10 rounded-full object-cover border border-slate-200">` :
                     `<div class="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm">${(window.currentUser.displayName || 'G')[0]}</div>`;
@@ -284,11 +337,8 @@
                     </div>
                 `;
             } else {
-                container.innerHTML = `
-                    <button onclick="openLoginModal(false)" class="px-3.5 py-2 bg-indigo-600 text-white rounded-xl text-xs font-bold shadow-md hover:bg-indigo-700 transition interactive-btn">
-                        ログイン
-                    </button>
-                `;
+                container.classList.add('hidden');
+                container.innerHTML = '';
             }
         }
 
@@ -346,10 +396,13 @@
                     subTitleEl.innerText = '編集モード';
                     subTitleEl.className = 'text-[10px] font-bold text-indigo-600 block leading-tight';
                 }
+                const accountTabBtn = document.getElementById('main-tab-account');
+                if (accountTabBtn) accountTabBtn.classList.remove('hidden');
             }
             window.initFirebase();
             if (typeof initCanvas === 'function') initCanvas();
             if (typeof renderAccountLists === 'function') renderAccountLists();
+            if (typeof renderHistoryList === 'function') renderHistoryList();
         };
     </script>
     <style>
@@ -392,15 +445,22 @@
 <body class="w-screen h-screen relative">
 
     <header class="absolute top-3 left-3 right-3 z-30 flex items-center justify-between pointer-events-none gap-2">
-        <!-- Title Box -->
-        <div class="bg-white/95 backdrop-blur-md px-4 py-2.5 rounded-2xl shadow-md border border-slate-200 pointer-events-auto flex items-center space-x-2.5 shrink-0">
-            <div id="connection-indicator" class="w-3 h-3 rounded-full bg-amber-500 relative flex items-center justify-center shrink-0">
-                <div id="connection-ping" class="absolute w-full h-full rounded-full bg-emerald-400 animate-shockwave hidden"></div>
+        <!-- Title Box + History Button -->
+        <div class="flex items-center gap-2 pointer-events-auto shrink-0">
+            <div class="bg-white/95 backdrop-blur-md px-4 py-2.5 rounded-2xl shadow-md border border-slate-200 flex items-center space-x-2.5 shrink-0">
+                <div id="connection-indicator" class="w-3 h-3 rounded-full bg-amber-500 relative flex items-center justify-center shrink-0">
+                    <div id="connection-ping" class="absolute w-full h-full rounded-full bg-emerald-400 animate-shockwave hidden"></div>
+                </div>
+                <div>
+                    <h1 class="font-bold text-slate-800 text-xs sm:text-sm leading-tight">挑戦ボード</h1>
+                    <span id="header-subtitle" class="text-[10px] text-slate-400 leading-tight"></span>
+                </div>
             </div>
-            <div>
-                <h1 class="font-bold text-slate-800 text-xs sm:text-sm leading-tight">挑戦ボード</h1>
-                <span id="header-subtitle" class="text-[10px] text-slate-400 leading-tight"></span>
-            </div>
+
+            <button onclick="openHistoryModal()" class="px-3.5 py-2.5 bg-white/95 hover:bg-indigo-50 backdrop-blur-md text-slate-700 hover:text-indigo-600 rounded-2xl shadow-md border border-slate-200 text-xs font-bold transition active:scale-95 interactive-btn flex items-center space-x-1.5">
+                <i class="fa-solid fa-clock-rotate-left text-indigo-600"></i>
+                <span>履歴</span>
+            </button>
         </div>
 
         <!-- Right Controls -->
@@ -425,7 +485,7 @@
             </div>
 
             <!-- User Icon / Logout Control -->
-            <div id="user-icon-container" class="bg-white/95 backdrop-blur-md p-1 rounded-2xl shadow-md border border-slate-200 flex items-center">
+            <div id="user-icon-container" class="bg-white/95 backdrop-blur-md p-1 rounded-2xl shadow-md border border-slate-200 flex items-center hidden">
                 <!-- Dynamic Loaded -->
             </div>
         </div>
@@ -445,18 +505,16 @@
         </div>
     </div>
 
-    <!-- Account View -->
+    <!-- Account View (編集モード時のみ利用可能) -->
     <div id="account-view" class="w-full h-full pt-20 pb-28 px-4 overflow-y-auto scrollable-list hidden">
         <div class="max-w-xl mx-auto space-y-4">
-            <!-- Sub Tabs (いまオンライン / ログイン済み) -->
+            <!-- Sub Tabs (オンライン / ログイン済み) -->
             <div class="bg-white p-1.5 rounded-2xl shadow-sm border border-slate-200 grid grid-cols-2 gap-1.5">
                 <button id="subtab-online-btn" onclick="switchAccountSubTab('online')" class="py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn">
-                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                    <span>いまオンライン</span>
+                    <span>オンライン</span>
                     <span id="online-count-badge" class="text-[11px] bg-white/20 px-2 py-0.5 rounded-full">0</span>
                 </button>
                 <button id="subtab-logged-btn" onclick="switchAccountSubTab('logged')" class="py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 text-slate-600 hover:bg-slate-50 interactive-btn">
-                    <i class="fa-solid fa-users text-xs"></i>
                     <span>ログイン済み</span>
                     <span id="logged-count-badge" class="text-[11px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">0</span>
                 </button>
@@ -470,16 +528,14 @@
         </div>
     </div>
 
-    <!-- Bottom Navigation Tabs (プラスボタンと同じ高さ: bottom-11 md:bottom-12) -->
+    <!-- Bottom Navigation Tabs (プラスボタンと同じ高さ: bottom-11 md:bottom-12 / イラストなし) -->
     <div class="fixed bottom-11 md:bottom-12 left-1/2 -translate-x-1/2 z-40 pointer-events-auto">
         <div class="bg-white/95 backdrop-blur-md p-1.5 rounded-2xl shadow-xl border border-slate-200 flex items-center space-x-1">
-            <button id="main-tab-board" onclick="switchMainTab('board')" class="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn">
-                <i class="fa-solid fa-note-sticky"></i>
-                <span>ボード</span>
+            <button id="main-tab-board" onclick="switchMainTab('board')" class="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition bg-indigo-600 text-white shadow-sm interactive-btn">
+                ボード
             </button>
-            <button id="main-tab-account" onclick="switchMainTab('account')" class="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 text-slate-600 hover:bg-slate-100 interactive-btn">
-                <i class="fa-solid fa-user-group"></i>
-                <span>アカウント</span>
+            <button id="main-tab-account" onclick="switchMainTab('account')" class="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-slate-600 hover:bg-slate-100 interactive-btn hidden">
+                アカウント
             </button>
         </div>
     </div>
@@ -502,6 +558,24 @@
                     <span class="text-sm">Googleアカウントでログイン</span>
                 </button>
             </div>
+        </div>
+    </div>
+
+    <!-- History Modal (編集・削除履歴＆復元) -->
+    <div id="history-modal" onclick="if(event.target === this) closeHistoryModal()" class="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center hidden opacity-0 transition-opacity duration-200 p-4">
+        <div class="bg-white rounded-3xl shadow-2xl border border-slate-100 w-full max-w-lg max-h-[84vh] flex flex-col overflow-hidden transform scale-95 transition-transform duration-200">
+            <div class="px-5 py-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between shrink-0">
+                <div class="flex items-center space-x-2">
+                    <div class="w-7 h-7 rounded-xl bg-indigo-600 text-white flex items-center justify-center text-xs">
+                        <i class="fa-solid fa-clock-rotate-left"></i>
+                    </div>
+                    <h3 class="font-bold text-slate-800 text-base">付箋の編集・削除履歴</h3>
+                </div>
+                <button type="button" onclick="closeHistoryModal()" class="w-8 h-8 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-700 flex items-center justify-center interactive-btn">
+                    <i class="fa-solid fa-xmark text-base"></i>
+                </button>
+            </div>
+            <div id="history-results-list" class="p-4 overflow-y-auto space-y-3 flex-1 bg-slate-50/70 scrollable-list"></div>
         </div>
     </div>
 
@@ -570,7 +644,7 @@
                 <input type="hidden" id="note-id-input">
                 <div>
                     <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">タイトル</label>
-                    <input type="text" id="note-title-input" placeholder="任意（空欄の場合は名前から自動作成）" class="w-full px-3.5 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 text-sm">
+                    <input type="text" id="note-title-input" placeholder="任意" class="w-full px-3.5 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600 text-sm">
                 </div>
 
                 <div>
@@ -670,14 +744,38 @@
         let currentMainTab = 'board';
         let currentAccountSubTab = 'online';
 
+        // author文字列を「学年・学級・名前」に分解するヘルパー
+        function parseAuthorParts(authorStr) {
+            const tokens = (authorStr || '').trim().split(/[\s\u3000\-]+/).filter(Boolean);
+            let grade = '';
+            let cls = '';
+            const nameTokens = [];
+
+            tokens.forEach((tok, index) => {
+                if (!grade && /^[1-3]年$/.test(tok)) {
+                    grade = tok;
+                } else if (!cls && /^[1-5]組$/.test(tok)) {
+                    cls = tok;
+                } else {
+                    nameTokens.push(tok);
+                }
+            });
+
+            return {
+                grade: grade,
+                cls: cls,
+                name: nameTokens.join(' ')
+            };
+        }
+
         // 学年に応じて学級セレクトボックスを更新（1年: 1〜5組, 2・3年: 1〜4組）
-        function updateClassOptions(gradeSelectId, classSelectId, defaultLabel) {
+        function updateClassOptions(gradeSelectId, classSelectId, defaultLabel, preferredClass = null) {
             const gradeEl = document.getElementById(gradeSelectId);
             const classEl = document.getElementById(classSelectId);
             if (!gradeEl || !classEl) return;
 
             const gradeVal = gradeEl.value;
-            const prevClassVal = classEl.value;
+            const targetClass = (preferredClass !== null) ? preferredClass : classEl.value;
             const maxClass = (gradeVal === '2年' || gradeVal === '3年') ? 4 : 5;
 
             let html = `<option value="">${defaultLabel}</option>`;
@@ -687,8 +785,8 @@
             }
             classEl.innerHTML = html;
 
-            if (prevClassVal && parseInt(prevClassVal, 10) <= maxClass) {
-                classEl.value = prevClassVal;
+            if (targetClass && parseInt(targetClass, 10) <= maxClass) {
+                classEl.value = targetClass;
             } else {
                 classEl.value = '';
             }
@@ -699,8 +797,139 @@
             renderSearchList();
         }
 
+        // 履歴モーダル開閉・描画・復元
+        function openHistoryModal() {
+            renderHistoryList();
+            showModal('history-modal');
+        }
+
+        function closeHistoryModal() {
+            closeModalById('history-modal');
+        }
+
+        function renderHistoryList() {
+            const container = document.getElementById('history-results-list');
+            if (!container) return;
+
+            const logs = window.auditLogsData || [];
+            if (logs.length === 0) {
+                container.innerHTML = `
+                    <div class="py-12 text-center text-slate-400">
+                        <i class="fa-regular fa-clock text-2xl mb-2 block"></i>
+                        <p class="text-xs">まだ編集・削除の履歴はありません</p>
+                    </div>
+                `;
+                return;
+            }
+
+            container.innerHTML = logs.map(log => {
+                const snap = log.noteSnapshot || log.beforeSnapshot || {};
+                const colors = colorMap[snap.color] || colorMap.yellow;
+                const timeStr = log.timestamp ? new Date(log.timestamp).toLocaleString('ja-JP') : '時刻不明';
+
+                let badgeHtml = '';
+                let detailHtml = '';
+
+                if (log.action === 'delete') {
+                    badgeHtml = `<span class="text-[11px] font-bold bg-rose-100 text-rose-700 px-2.5 py-0.5 rounded-full">削除</span>`;
+                    detailHtml = `
+                        <p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(snap.title || '無題')}</p>
+                        <p class="text-xs text-slate-700 whitespace-pre-wrap bg-white/80 p-2.5 rounded-xl border border-black/5">${escapeHtml(snap.content || '')}</p>
+                    `;
+                } else if (log.action === 'edit') {
+                    badgeHtml = `<span class="text-[11px] font-bold bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-full">編集</span>`;
+                    const beforeContent = log.beforeSnapshot ? log.beforeSnapshot.content : '';
+                    const afterContent = log.noteSnapshot ? log.noteSnapshot.content : '';
+                    detailHtml = `
+                        <p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(snap.title || '無題')}</p>
+                        ${beforeContent !== afterContent ? `
+                            <div class="space-y-1.5">
+                                <div class="text-[11px] text-slate-500 bg-white/70 p-2 rounded-xl border border-black/5">
+                                    <span class="font-bold text-rose-600 block mb-0.5">編集前:</span>
+                                    <span class="whitespace-pre-wrap">${escapeHtml(beforeContent)}</span>
+                                </div>
+                                <div class="text-[11px] text-slate-700 bg-white/90 p-2 rounded-xl border border-black/5">
+                                    <span class="font-bold text-emerald-700 block mb-0.5">編集後:</span>
+                                    <span class="whitespace-pre-wrap">${escapeHtml(afterContent)}</span>
+                                </div>
+                            </div>
+                        ` : `
+                            <p class="text-xs text-slate-700 whitespace-pre-wrap bg-white/80 p-2.5 rounded-xl border border-black/5">${escapeHtml(afterContent)}</p>
+                        `}
+                    `;
+                } else if (log.action === 'restore') {
+                    badgeHtml = `<span class="text-[11px] font-bold bg-indigo-100 text-indigo-700 px-2.5 py-0.5 rounded-full">復元</span>`;
+                    detailHtml = `
+                        <p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(snap.title || '無題')}</p>
+                        <p class="text-xs text-slate-700 whitespace-pre-wrap bg-white/80 p-2.5 rounded-xl border border-black/5">${escapeHtml(snap.content || '')}</p>
+                    `;
+                } else {
+                    badgeHtml = `<span class="text-[11px] font-bold bg-emerald-100 text-emerald-700 px-2.5 py-0.5 rounded-full">作成</span>`;
+                    detailHtml = `
+                        <p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(snap.title || '無題')}</p>
+                        <p class="text-xs text-slate-700 whitespace-pre-wrap bg-white/80 p-2.5 rounded-xl border border-black/5">${escapeHtml(snap.content || '')}</p>
+                    `;
+                }
+
+                const canRestore = (log.action === 'delete' || log.action === 'edit') && (log.beforeSnapshot || log.noteSnapshot);
+                const restoreBtnHtml = canRestore ? `
+                    <button type="button" onclick="restoreNoteFromLog('${log.id}')" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold rounded-xl shadow-sm transition active:scale-95 interactive-btn">
+                        ボードに復元
+                    </button>
+                ` : '';
+
+                return `
+                    <div class="p-3.5 rounded-2xl border ${colors.border} ${colors.bg} space-y-2 shadow-sm">
+                        <div class="flex items-center justify-between gap-2">
+                            <div class="flex items-center space-x-2">
+                                ${badgeHtml}
+                                <span class="text-xs font-bold text-slate-800">${escapeHtml(log.actorName || 'ユーザー')}</span>
+                            </div>
+                            <span class="text-[11px] text-slate-500">${timeStr}</span>
+                        </div>
+                        ${detailHtml}
+                        <div class="flex items-center justify-between pt-1">
+                            <span class="text-[11px] text-slate-500">${escapeHtml(snap.author || '')}</span>
+                            ${restoreBtnHtml}
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        async function restoreNoteFromLog(logId) {
+            const log = (window.auditLogsData || []).find(l => l.id === logId);
+            if (!log) return;
+            const sourceSnap = log.beforeSnapshot || log.noteSnapshot;
+            if (!sourceSnap) return;
+
+            if (!confirm('この状態の付箋をボードに復元しますか？')) return;
+
+            const viewport = document.getElementById('viewport');
+            const centerX = viewport ? (-panX + viewport.clientWidth / 2) / scale + (Math.random() * 50 - 25) : 2500;
+            const centerY = viewport ? (-panY + viewport.clientHeight / 2) / scale + (Math.random() * 50 - 25) : 2500;
+
+            const restoredNote = {
+                ...sourceSnap,
+                id: 'note_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
+                x: Math.max(200, Math.min(4800, sourceSnap.x || centerX)),
+                y: Math.max(200, Math.min(4800, sourceSnap.y || centerY)),
+                updatedAt: new Date().toISOString()
+            };
+
+            window.notesData.push(restoredNote);
+            await saveNoteToDb(restoredNote);
+            await recordAuditLog('restore', restoredNote, null);
+
+            closeHistoryModal();
+            if (currentMainTab !== 'board') switchMainTab('board');
+            renderNotes();
+            renderSearchList();
+        }
+
         // メインタブ切り替え（ボード / アカウント）
         function switchMainTab(tab) {
+            if (tab === 'account' && !window.isAdminMode) return;
             currentMainTab = tab;
             const boardView = document.getElementById('board-view');
             const accountView = document.getElementById('account-view');
@@ -713,20 +942,20 @@
                 accountView.classList.add('hidden');
                 boardTopControls.classList.remove('hidden');
 
-                tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn';
-                tabAccountBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 text-slate-600 hover:bg-slate-100 interactive-btn';
+                tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition bg-indigo-600 text-white shadow-sm interactive-btn';
+                tabAccountBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-slate-600 hover:bg-slate-100 interactive-btn';
             } else {
                 boardView.classList.add('hidden');
                 accountView.classList.remove('hidden');
                 boardTopControls.classList.add('hidden');
 
-                tabAccountBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn';
-                tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 text-slate-600 hover:bg-slate-100 interactive-btn';
+                tabAccountBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition bg-indigo-600 text-white shadow-sm interactive-btn';
+                tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-slate-600 hover:bg-slate-100 interactive-btn';
                 renderAccountLists();
             }
         }
 
-        // アカウント画面のサブタブ切り替え（いまオンライン / ログイン済み）
+        // アカウント画面のサブタブ切り替え（オンライン / ログイン済み）
         function switchAccountSubTab(subTab) {
             currentAccountSubTab = subTab;
             const onlineBtn = document.getElementById('subtab-online-btn');
@@ -756,7 +985,6 @@
             const loggedBadge = document.getElementById('logged-count-badge');
             if (!onlinePanel || !loggedPanel) return;
 
-            // Firestore上のユーザー・ローカルセッション・付箋投稿者情報を統合して重複排除
             const userMap = new Map();
 
             (window.loginSessions || []).forEach(u => {
@@ -797,7 +1025,7 @@
             const nowMs = Date.now();
             const allUsers = Array.from(userMap.values()).map(u => {
                 const lastActiveMs = u.lastActiveAt ? new Date(u.lastActiveAt).getTime() : 0;
-                const isRecentlyActive = (nowMs - lastActiveMs) < 90000; // 90秒以内にアクティブならオンライン扱い
+                const isRecentlyActive = (nowMs - lastActiveMs) < 90000;
                 const isSelf = window.currentUser && u.uid === window.currentUser.uid;
                 return {
                     ...u,
@@ -805,7 +1033,6 @@
                 };
             });
 
-            // 最終アクティブ順でソート
             allUsers.sort((a, b) => {
                 const ta = a.lastActiveAt ? new Date(a.lastActiveAt).getTime() : 0;
                 const tb = b.lastActiveAt ? new Date(b.lastActiveAt).getTime() : 0;
@@ -825,7 +1052,7 @@
                     </div>
                 `;
             } else {
-                onlinePanel.innerHTML = onlineUsers.map(u => createAccountCardHtml(u, true)).join('');
+                onlinePanel.innerHTML = onlineUsers.map(u => createAccountCardHtml(u)).join('');
             }
 
             if (allUsers.length === 0) {
@@ -836,11 +1063,11 @@
                     </div>
                 `;
             } else {
-                loggedPanel.innerHTML = allUsers.map(u => createAccountCardHtml(u, false)).join('');
+                loggedPanel.innerHTML = allUsers.map(u => createAccountCardHtml(u)).join('');
             }
         }
 
-        function createAccountCardHtml(user, forceOnlineBadge) {
+        function createAccountCardHtml(user) {
             const isSelf = window.currentUser && user.uid === window.currentUser.uid;
             const initial = (user.displayName || 'U')[0];
             const avatarHtml = user.photoURL
@@ -1062,7 +1289,6 @@
             updateTransform();
         }
 
-        // 「中央へ」ボタン：一番最初の状態のように付箋全部が映り込む状態へ移動
         function resetView() {
             fitAllNotes(true);
         }
@@ -1083,7 +1309,6 @@
                     div.style.cursor = 'pointer';
                     div.onclick = (e) => {
                         if (e.target.closest('button')) return;
-                        // ドラッグ移動した直後はクリック判定にしない
                         if (didDragMove) {
                             didDragMove = false;
                             return;
@@ -1368,7 +1593,6 @@
                 const rawDx = moveEvent.clientX - dragStartPointerX;
                 const rawDy = moveEvent.clientY - dragStartPointerY;
 
-                // 5px以上動かしたらドラッグ移動とみなし、離したときのクリック判定を無効化
                 if (!didDragMove && Math.hypot(rawDx, rawDy) > 5) {
                     didDragMove = true;
                 }
@@ -1392,7 +1616,6 @@
                     if (didDragMove) {
                         const targetNote = window.notesData.find(n => n.id === id);
                         if (targetNote) saveNoteToDb(targetNote);
-                        // onclickイベントが直後に発火するのを防ぐため少し遅らせてフラグを戻す
                         setTimeout(() => { didDragMove = false; }, 100);
                     }
                     activeNoteId = null;
@@ -1415,8 +1638,7 @@
             document.getElementById('note-title-input').value = '';
             document.getElementById('note-content-input').value = '';
             document.getElementById('note-grade-input').value = '';
-            updateClassOptions('note-grade-input', 'note-class-input', '選択');
-            document.getElementById('note-class-input').value = '';
+            updateClassOptions('note-grade-input', 'note-class-input', '選択', '');
             document.getElementById('note-name-input').value = '';
             document.querySelector('input[name="note-color"][value="yellow"]').checked = true;
             showModal('note-modal');
@@ -1432,11 +1654,11 @@
             document.getElementById('note-title-input').value = note.title || '';
             document.getElementById('note-content-input').value = note.content || '';
             
-            const authorParts = (note.author || '').split(/[\s\-]/);
-            document.getElementById('note-grade-input').value = authorParts[0] || '';
-            updateClassOptions('note-grade-input', 'note-class-input', '選択');
-            document.getElementById('note-class-input').value = authorParts[1] || '';
-            document.getElementById('note-name-input').value = authorParts.slice(2).join(' ') || authorParts[2] || '';
+            const parsed = parseAuthorParts(note.author || '');
+            const gradeSelect = document.getElementById('note-grade-input');
+            gradeSelect.value = parsed.grade;
+            updateClassOptions('note-grade-input', 'note-class-input', '選択', parsed.cls);
+            document.getElementById('note-name-input').value = parsed.name;
             
             const colorRadio = document.querySelector(`input[name="note-color"][value="${note.color || 'yellow'}"]`);
             if (colorRadio) colorRadio.checked = true;
@@ -1444,13 +1666,15 @@
             showModal('note-modal');
         }
 
-        function confirmDelete(id) {
+        async function confirmDelete(id) {
             if (!window.currentUser && !window.isAdminMode) return;
             const note = window.notesData.find(n => n.id === id);
             if (!note || (note.creatorId !== window.myCreatorId && !window.isAdminMode)) return;
 
             if (confirm('この付箋を削除してもよろしいですか？')) {
-                deleteNoteFromDb(id);
+                const deletedSnap = JSON.parse(JSON.stringify(note));
+                await deleteNoteFromDb(id);
+                await recordAuditLog('delete', deletedSnap, deletedSnap);
             }
         }
 
@@ -1480,7 +1704,7 @@
             closeModalById('note-modal');
         }
 
-        function handleFormSubmit(e) {
+        async function handleFormSubmit(e) {
             e.preventDefault();
             if (!window.currentUser && !window.isAdminMode) {
                 openLoginModal(true);
@@ -1503,12 +1727,6 @@
 
             if (!content) return;
 
-            if (!title) {
-                if (name) title = name + 'の挑戦';
-                else if (author) title = author + 'の挑戦';
-                else title = 'みんなの挑戦';
-            }
-
             const now = new Date().toISOString();
             const currentUserName = window.currentUser ? window.currentUser.displayName : (name || '匿名');
             const currentUserPhoto = window.currentUser ? window.currentUser.photoURL : '';
@@ -1517,6 +1735,20 @@
             if (idInput) {
                 const existingNote = window.notesData.find(n => n.id === idInput);
                 if (existingNote && (existingNote.creatorId === window.myCreatorId || window.isAdminMode)) {
+                    const beforeSnap = JSON.parse(JSON.stringify(existingNote));
+                    const prevParsed = parseAuthorParts(existingNote.author || '');
+                    const prevAutoTitle = prevParsed.name
+                        ? (prevParsed.name + 'の挑戦')
+                        : (existingNote.author ? (existingNote.author + 'の挑戦') : 'みんなの挑戦');
+
+                    if (!title) {
+                        if (name) title = name + 'の挑戦';
+                        else if (author) title = author + 'の挑戦';
+                        else title = 'みんなの挑戦';
+                    } else if (name && name !== prevParsed.name && title === prevAutoTitle) {
+                        title = name + 'の挑戦';
+                    }
+
                     if (existingNote.content !== content) {
                         if (!existingNote.history) existingNote.history = [];
                         existingNote.history.push({
@@ -1530,9 +1762,16 @@
                     existingNote.author = author;
                     existingNote.color = document.querySelector('input[name="note-color"]:checked').value;
                     existingNote.updatedAt = now;
-                    saveNoteToDb(existingNote);
+                    await saveNoteToDb(existingNote);
+                    await recordAuditLog('edit', existingNote, beforeSnap);
                 }
             } else {
+                if (!title) {
+                    if (name) title = name + 'の挑戦';
+                    else if (author) title = author + 'の挑戦';
+                    else title = 'みんなの挑戦';
+                }
+
                 const viewport = document.getElementById('viewport');
                 const centerX = (-panX + viewport.clientWidth / 2) / scale + (Math.random() * 60 - 30);
                 const centerY = (-panY + viewport.clientHeight / 2) / scale + (Math.random() * 60 - 30);
@@ -1554,7 +1793,8 @@
                     history: []
                 };
                 window.notesData.push(newNote);
-                saveNoteToDb(newNote);
+                await saveNoteToDb(newNote);
+                await recordAuditLog('create', newNote, null);
             }
 
             closeModal();
