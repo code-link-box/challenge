@@ -30,14 +30,13 @@
         let db, auth;
         let isFirebaseConnected = false;
 
+        // ★ 編集者モードの合言葉を変えたいときはこの行（29行目）を変更
         window.isAdminMode = (window.location.hash === '#admin-administrator-()');
         window.notesData = [];
         window.currentUser = null;
-        window.isViewOnlyMode = false;
         window.loginSessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
 
         window.initFirebase = async function() {
-            // 起動時にログインボタンの状態を確実に初期化（「移動中」で固まるのを防止）
             const btn = document.getElementById('google-login-btn');
             if (btn) {
                 btn.disabled = false;
@@ -49,7 +48,6 @@
                 db = getFirestore(app);
                 auth = getAuth(app);
 
-                // リダイレクト結果の受け取り（フォールバック用）
                 try {
                     const result = await getRedirectResult(auth);
                     if (result && result.user) {
@@ -59,12 +57,11 @@
                     console.warn("Redirect result info:", redirectErr);
                 }
 
-                // 認証状態の監視
                 onAuthStateChanged(auth, (user) => {
                     if (user && !user.isAnonymous) {
                         handleSuccessfulUser(user);
                     } else {
-                        if (!window.currentUser && !window.isViewOnlyMode) {
+                        if (!window.currentUser) {
                             openLoginModal();
                         }
                     }
@@ -104,7 +101,6 @@
                 photoURL: user.photoURL || ''
             };
             window.myCreatorId = user.uid;
-            window.isViewOnlyMode = false;
 
             recordLoginSession(window.currentUser);
             updateUserIconUI();
@@ -132,7 +128,6 @@
             }
             window.loginSessions = sessions;
             localStorage.setItem('freeboard_login_sessions', JSON.stringify(sessions));
-            if (typeof renderAdminTabs === 'function') renderAdminTabs();
         }
 
         window.googleLogin = async function() {
@@ -143,7 +138,6 @@
             }
             try {
                 const provider = new GoogleAuthProvider();
-                // まずポップアップ認証を試行し、ポップアップブロックや環境制限がある場合のみリダイレクトにフォールバック
                 try {
                     await signInWithPopup(auth, provider);
                 } catch (popupErr) {
@@ -160,13 +154,6 @@
             }
         };
 
-        window.enterViewOnlyMode = function() {
-            window.isViewOnlyMode = true;
-            closeLoginModal();
-            updateUserIconUI();
-            if (typeof renderNotes === 'function') renderNotes();
-        };
-
         window.logoutUser = async function() {
             if (confirm("ログアウトしますか？")) {
                 try {
@@ -176,12 +163,10 @@
                         localStorage.setItem('freeboard_login_sessions', JSON.stringify(sessions));
                         window.loginSessions = sessions;
                     }
-                    window.isViewOnlyMode = false;
                     await signOut(auth);
                     window.currentUser = null;
                     updateUserIconUI();
                     
-                    // ログアウト後にボタン表示を確実に戻してからログインモーダルを表示
                     const btn = document.getElementById('google-login-btn');
                     if (btn) {
                         btn.disabled = false;
@@ -201,7 +186,7 @@
             const saved = localStorage.getItem('freeboard_local_notes');
             window.notesData = saved ? JSON.parse(saved) : [];
             
-            if (!window.currentUser && !window.isViewOnlyMode) {
+            if (!window.currentUser) {
                 openLoginModal();
             }
 
@@ -312,9 +297,6 @@
                     subTitleEl.innerText = '編集者モード';
                     subTitleEl.className = 'text-[10px] font-bold text-indigo-600 block leading-tight';
                 }
-                const adminPanel = document.getElementById('admin-panel-container');
-                if (adminPanel) adminPanel.classList.remove('hidden');
-                if (typeof renderAdminTabs === 'function') renderAdminTabs();
             }
             window.initFirebase();
             if (typeof initCanvas === 'function') initCanvas();
@@ -402,25 +384,10 @@
     </div>
 
     <!-- Plus Button -->
-    <div class="absolute bottom-24 right-6 md:bottom-20 md:right-8 z-40">
+    <div class="absolute bottom-6 right-6 md:bottom-8 md:right-8 z-40">
         <button onclick="handlePlusClick()" class="w-16 h-16 bg-indigo-600 hover:bg-indigo-700 active:scale-90 text-white rounded-full shadow-xl flex items-center justify-center text-2xl transition transform interactive-btn" title="新しい挑戦を書き込む">
             <i class="fa-solid fa-plus"></i>
         </button>
-    </div>
-
-    <!-- Admin Panel -->
-    <div id="admin-panel-container" class="absolute bottom-3 left-3 right-3 z-30 pointer-events-none hidden">
-        <div class="max-w-2xl mx-auto bg-white/95 backdrop-blur-md rounded-2xl shadow-xl border border-indigo-100 p-3 pointer-events-auto flex flex-col space-y-2">
-            <div class="flex items-center justify-between border-b border-slate-100 pb-2">
-                <div class="flex items-center space-x-2">
-                    <div class="w-6 h-6 rounded-lg bg-indigo-600 text-white flex items-center justify-center text-xs">
-                        <i class="fa-solid fa-shield-halved"></i>
-                    </div>
-                    <span class="text-xs font-bold text-slate-800">編集者モード：ログインユーザー管理タブ</span>
-                </div>
-            </div>
-            <div id="admin-sessions-list" class="max-h-32 overflow-y-auto space-y-1.5 scrollable-list pr-1"></div>
-        </div>
     </div>
 
     <!-- Login Modal -->
@@ -431,18 +398,14 @@
             </div>
             <div class="space-y-1">
                 <h3 id="login-modal-title" class="font-bold text-slate-800 text-lg">挑戦ボードへようこそ</h3>
-                <p id="login-modal-desc" class="text-xs text-slate-500 leading-relaxed">付箋の投稿・編集を行うにはGoogleログインが必要です。見るだけの場合は「ボードを閲覧」を選択してください。</p>
+                <p id="login-modal-desc" class="text-xs text-slate-500 leading-relaxed">付箋の閲覧・投稿・編集を行うにはGoogleアカウントでログインしてください。</p>
             </div>
-            <div class="space-y-2.5 pt-1">
+            <div class="pt-1">
                 <button id="google-login-btn" onclick="googleLogin()" class="w-full py-3.5 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-2xl shadow-md flex items-center justify-center space-x-3 transition active:scale-95 interactive-btn">
                     <div class="bg-white p-1 rounded-full">
                         <svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
                     </div>
                     <span class="text-sm">Googleアカウントでログイン</span>
-                </button>
-                <button onclick="enterViewOnlyMode()" class="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-2xl text-xs transition active:scale-95 interactive-btn flex items-center justify-center space-x-2">
-                    <i class="fa-regular fa-eye"></i>
-                    <span>ボードを閲覧（見るだけ）</span>
                 </button>
             </div>
         </div>
@@ -936,7 +899,7 @@
                     descEl.innerText = '新しい付箋を書き込むにはGoogleアカウントでログインしてください。';
                 } else {
                     titleEl.innerText = '挑戦ボードへようこそ';
-                    descEl.innerText = '付箋の投稿・編集を行うにはGoogleログインが必要です。見るだけの場合は「ボードを閲覧」を選択してください。';
+                    descEl.innerText = '付箋の閲覧・投稿・編集を行うにはGoogleアカウントでログインしてください。';
                 }
             }
             showModal('login-modal');
