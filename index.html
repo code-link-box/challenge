@@ -29,10 +29,12 @@
 
         let db, auth;
         let isFirebaseConnected = false;
+        let presenceInterval = null;
 
-        // ★ 編集者モードの合言葉を変えたいときはこの行（29行目）を変更
+        // ★ 編集モードの合言葉を変えたいときはこの行を変更
         window.isAdminMode = (window.location.hash === '#admin-administrator-()');
         window.notesData = [];
+        window.usersData = [];
         window.currentUser = null;
         window.loginSessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
 
@@ -71,9 +73,9 @@
                 isFirebaseConnected = true;
                 updateConnectionIndicator(true);
                 
-                const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'notes');
-                
-                onSnapshot(colRef, (snapshot) => {
+                // 付箋データのリアルタイム同期
+                const notesColRef = collection(db, 'artifacts', appId, 'public', 'data', 'notes');
+                onSnapshot(notesColRef, (snapshot) => {
                     const notes = [];
                     snapshot.forEach(docSnap => {
                         notes.push({ id: docSnap.id, ...docSnap.data() });
@@ -87,48 +89,96 @@
                     fallbackToLocal();
                 });
 
+                // ユーザー一覧・オンライン状態のリアルタイム同期
+                const usersColRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
+                onSnapshot(usersColRef, (snapshot) => {
+                    const users = [];
+                    snapshot.forEach(docSnap => {
+                        users.push({ uid: docSnap.id, ...docSnap.data() });
+                    });
+                    window.usersData = users;
+                    if (typeof renderAccountLists === 'function') renderAccountLists();
+                }, (error) => {
+                    console.warn("Users sync warning:", error);
+                });
+
             } catch (e) {
                 console.warn("Firebase connection failed, falling back to local:", e);
                 fallbackToLocal();
             }
         };
 
+        async function syncUserPresence(user, isOnline) {
+            if (!user) return;
+            const now = new Date().toISOString();
+            const userPayload = {
+                uid: user.uid,
+                displayName: user.displayName || '名無しさん',
+                email: user.email || '',
+                photoURL: user.photoURL || '',
+                isOnline: isOnline,
+                lastLoginAt: user.lastLoginAt || now,
+                lastActiveAt: now
+            };
+
+            // ローカルセッションも更新
+            const sessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
+            const idx = sessions.findIndex(s => s.uid === user.uid);
+            if (idx >= 0) {
+                sessions[idx] = { ...sessions[idx], ...userPayload };
+            } else {
+                sessions.push(userPayload);
+            }
+            window.loginSessions = sessions;
+            localStorage.setItem('freeboard_login_sessions', JSON.stringify(sessions));
+
+            if (isFirebaseConnected && db) {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', user.uid), userPayload, { merge: true });
+                } catch (e) {
+                    console.warn("Failed to sync user presence:", e);
+                }
+            }
+            if (typeof renderAccountLists === 'function') renderAccountLists();
+        }
+
+        function startPresenceHeartbeat() {
+            if (presenceInterval) clearInterval(presenceInterval);
+            presenceInterval = setInterval(() => {
+                if (window.currentUser && document.visibilityState === 'visible') {
+                    syncUserPresence(window.currentUser, true);
+                }
+            }, 30000);
+        }
+
         function handleSuccessfulUser(user) {
+            const now = new Date().toISOString();
             window.currentUser = {
                 uid: user.uid,
                 displayName: user.displayName || '名無しさん',
                 email: user.email || '',
-                photoURL: user.photoURL || ''
+                photoURL: user.photoURL || '',
+                lastLoginAt: now
             };
             window.myCreatorId = user.uid;
 
-            recordLoginSession(window.currentUser);
+            syncUserPresence(window.currentUser, true);
+            startPresenceHeartbeat();
             updateUserIconUI();
             closeLoginModal();
         }
 
-        function recordLoginSession(user) {
-            const sessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
-            const existingIndex = sessions.findIndex(s => s.uid === user.uid);
-            const sessionData = {
-                uid: user.uid,
-                displayName: user.displayName,
-                email: user.email,
-                photoURL: user.photoURL,
-                lastLoginAt: new Date().toISOString(),
-                isCurrent: true
-            };
-
-            sessions.forEach(s => s.isCurrent = false);
-
-            if (existingIndex >= 0) {
-                sessions[existingIndex] = sessionData;
-            } else {
-                sessions.push(sessionData);
+        // タブの表示・非表示やページ離脱時のオンライン状態更新
+        document.addEventListener('visibilitychange', () => {
+            if (window.currentUser) {
+                syncUserPresence(window.currentUser, document.visibilityState === 'visible');
             }
-            window.loginSessions = sessions;
-            localStorage.setItem('freeboard_login_sessions', JSON.stringify(sessions));
-        }
+        });
+        window.addEventListener('beforeunload', () => {
+            if (window.currentUser) {
+                syncUserPresence(window.currentUser, false);
+            }
+        });
 
         window.googleLogin = async function() {
             const btn = document.getElementById('google-login-btn');
@@ -157,11 +207,9 @@
         window.logoutUser = async function() {
             if (confirm("ログアウトしますか？")) {
                 try {
+                    if (presenceInterval) clearInterval(presenceInterval);
                     if (window.currentUser) {
-                        const sessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
-                        sessions.forEach(s => s.isCurrent = false);
-                        localStorage.setItem('freeboard_login_sessions', JSON.stringify(sessions));
-                        window.loginSessions = sessions;
+                        await syncUserPresence(window.currentUser, false);
                     }
                     await signOut(auth);
                     window.currentUser = null;
@@ -192,6 +240,7 @@
 
             if (typeof renderNotes === 'function') renderNotes();
             if (typeof renderSearchList === 'function') renderSearchList();
+            if (typeof renderAccountLists === 'function') renderAccountLists();
         }
 
         function updateConnectionIndicator(isConnected) {
@@ -294,12 +343,13 @@
             if (window.isAdminMode) {
                 const subTitleEl = document.getElementById('header-subtitle');
                 if (subTitleEl) {
-                    subTitleEl.innerText = '編集者モード';
+                    subTitleEl.innerText = '編集モード';
                     subTitleEl.className = 'text-[10px] font-bold text-indigo-600 block leading-tight';
                 }
             }
             window.initFirebase();
             if (typeof initCanvas === 'function') initCanvas();
+            if (typeof renderAccountLists === 'function') renderAccountLists();
         };
     </script>
     <style>
@@ -355,21 +405,23 @@
 
         <!-- Right Controls -->
         <div class="flex items-center gap-2 pointer-events-auto shrink-0">
-            <button onclick="openSearchModal()" class="w-11 h-11 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-2xl shadow-md flex items-center justify-center transition interactive-btn" title="投稿を検索">
-                <i class="fa-solid fa-magnifying-glass text-sm"></i>
-            </button>
+            <div id="board-top-controls" class="flex items-center gap-2">
+                <button onclick="openSearchModal()" class="w-11 h-11 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white rounded-2xl shadow-md flex items-center justify-center transition interactive-btn" title="投稿を検索">
+                    <i class="fa-solid fa-magnifying-glass text-sm"></i>
+                </button>
 
-            <div class="bg-white/95 backdrop-blur-md px-2 py-1.5 rounded-2xl shadow-md border border-slate-200 flex items-center space-x-1">
-                <button onclick="zoomIn()" class="w-8 h-8 rounded-xl hover:bg-indigo-50 text-indigo-600 flex items-center justify-center active:scale-95 transition interactive-btn" title="拡大">
-                    <i class="fa-solid fa-magnifying-glass-plus text-xs"></i>
-                </button>
-                <span id="zoom-level" class="text-[11px] font-semibold text-slate-600 w-9 text-center">100%</span>
-                <button onclick="zoomOut()" class="w-8 h-8 rounded-xl hover:bg-indigo-50 text-indigo-600 flex items-center justify-center active:scale-95 transition interactive-btn" title="縮小">
-                    <i class="fa-solid fa-magnifying-glass-minus text-xs"></i>
-                </button>
-                <button onclick="resetView()" class="px-2.5 py-1.5 text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl active:scale-95 transition interactive-btn">
-                    中央へ
-                </button>
+                <div class="bg-white/95 backdrop-blur-md px-2 py-1.5 rounded-2xl shadow-md border border-slate-200 flex items-center space-x-1">
+                    <button onclick="zoomIn()" class="w-8 h-8 rounded-xl hover:bg-indigo-50 text-indigo-600 flex items-center justify-center active:scale-95 transition interactive-btn" title="拡大">
+                        <i class="fa-solid fa-magnifying-glass-plus text-xs"></i>
+                    </button>
+                    <span id="zoom-level" class="text-[11px] font-semibold text-slate-600 w-9 text-center">100%</span>
+                    <button onclick="zoomOut()" class="w-8 h-8 rounded-xl hover:bg-indigo-50 text-indigo-600 flex items-center justify-center active:scale-95 transition interactive-btn" title="縮小">
+                        <i class="fa-solid fa-magnifying-glass-minus text-xs"></i>
+                    </button>
+                    <button onclick="resetView()" class="px-2.5 py-1.5 text-[11px] font-semibold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl active:scale-95 transition interactive-btn">
+                        中央へ
+                    </button>
+                </div>
             </div>
 
             <!-- User Icon / Logout Control -->
@@ -379,15 +431,57 @@
         </div>
     </header>
 
-    <div id="viewport" class="w-full h-full relative overflow-hidden canvas-bg">
-        <div id="canvas" class="absolute top-0 left-0 w-[5000px] h-[5000px] origin-top-left"></div>
+    <!-- Board View -->
+    <div id="board-view" class="w-full h-full relative">
+        <div id="viewport" class="w-full h-full relative overflow-hidden canvas-bg">
+            <div id="canvas" class="absolute top-0 left-0 w-[5000px] h-[5000px] origin-top-left"></div>
+        </div>
+
+        <!-- Plus Button (ドット0.5個分=約20px上へ配置) -->
+        <div class="absolute bottom-11 right-6 md:bottom-12 md:right-8 z-40">
+            <button onclick="handlePlusClick()" class="w-16 h-16 bg-indigo-600 hover:bg-indigo-700 active:scale-90 text-white rounded-full shadow-xl flex items-center justify-center text-2xl transition transform interactive-btn" title="新しい挑戦を書き込む">
+                <i class="fa-solid fa-plus"></i>
+            </button>
+        </div>
     </div>
 
-    <!-- Plus Button -->
-    <div class="absolute bottom-6 right-6 md:bottom-8 md:right-8 z-40">
-        <button onclick="handlePlusClick()" class="w-16 h-16 bg-indigo-600 hover:bg-indigo-700 active:scale-90 text-white rounded-full shadow-xl flex items-center justify-center text-2xl transition transform interactive-btn" title="新しい挑戦を書き込む">
-            <i class="fa-solid fa-plus"></i>
-        </button>
+    <!-- Account View -->
+    <div id="account-view" class="w-full h-full pt-20 pb-28 px-4 overflow-y-auto scrollable-list hidden">
+        <div class="max-w-xl mx-auto space-y-4">
+            <!-- Sub Tabs (いまオンライン / ログイン済み) -->
+            <div class="bg-white p-1.5 rounded-2xl shadow-sm border border-slate-200 grid grid-cols-2 gap-1.5">
+                <button id="subtab-online-btn" onclick="switchAccountSubTab('online')" class="py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                    <span>いまオンライン</span>
+                    <span id="online-count-badge" class="text-[11px] bg-white/20 px-2 py-0.5 rounded-full">0</span>
+                </button>
+                <button id="subtab-logged-btn" onclick="switchAccountSubTab('logged')" class="py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 text-slate-600 hover:bg-slate-50 interactive-btn">
+                    <i class="fa-solid fa-users text-xs"></i>
+                    <span>ログイン済み</span>
+                    <span id="logged-count-badge" class="text-[11px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">0</span>
+                </button>
+            </div>
+
+            <!-- Online Users List -->
+            <div id="account-online-panel" class="space-y-2.5"></div>
+
+            <!-- Logged-in History Users List -->
+            <div id="account-logged-panel" class="space-y-2.5 hidden"></div>
+        </div>
+    </div>
+
+    <!-- Bottom Navigation Tabs (プラスボタンと同じ高さ: bottom-11 md:bottom-12) -->
+    <div class="fixed bottom-11 md:bottom-12 left-1/2 -translate-x-1/2 z-40 pointer-events-auto">
+        <div class="bg-white/95 backdrop-blur-md p-1.5 rounded-2xl shadow-xl border border-slate-200 flex items-center space-x-1">
+            <button id="main-tab-board" onclick="switchMainTab('board')" class="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn">
+                <i class="fa-solid fa-note-sticky"></i>
+                <span>ボード</span>
+            </button>
+            <button id="main-tab-account" onclick="switchMainTab('account')" class="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 text-slate-600 hover:bg-slate-100 interactive-btn">
+                <i class="fa-solid fa-user-group"></i>
+                <span>アカウント</span>
+            </button>
+        </div>
     </div>
 
     <!-- Login Modal -->
@@ -436,14 +530,11 @@
                 </div>
 
                 <div class="grid grid-cols-2 gap-2">
-                    <select id="grade-filter" onchange="renderSearchList()" class="w-full bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-600">
+                    <select id="grade-filter" onchange="onSearchGradeChange()" class="w-full bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-600">
                         <option value="">学年すべて</option>
                         <option value="1年">1年</option>
                         <option value="2年">2年</option>
                         <option value="3年">3年</option>
-                        <option value="4年">4年</option>
-                        <option value="5年">5年</option>
-                        <option value="6年">6年</option>
                     </select>
                     <select id="class-filter" onchange="renderSearchList()" class="w-full bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-700 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-600">
                         <option value="">学級すべて</option>
@@ -490,14 +581,11 @@
                 <div class="grid grid-cols-3 gap-2">
                     <div>
                         <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">学年</label>
-                        <select id="note-grade-input" class="w-full px-2 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600">
+                        <select id="note-grade-input" onchange="updateClassOptions('note-grade-input', 'note-class-input', '選択')" class="w-full px-2 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-600">
                             <option value="">選択</option>
                             <option value="1年">1年</option>
                             <option value="2年">2年</option>
                             <option value="3年">3年</option>
-                            <option value="4年">4年</option>
-                            <option value="5年">5年</option>
-                            <option value="6年">6年</option>
                         </select>
                     </div>
                     <div>
@@ -545,7 +633,7 @@
                     <div class="w-7 h-7 rounded-xl bg-indigo-600 text-white flex items-center justify-center text-xs">
                         <i class="fa-solid fa-circle-info"></i>
                     </div>
-                    <h3 class="font-bold text-slate-800 text-base">付箋の詳細・編集履歴 (編集者モード)</h3>
+                    <h3 class="font-bold text-slate-800 text-base">付箋の詳細・編集履歴 (編集モード)</h3>
                 </div>
                 <button type="button" onclick="closeAdminDetailModal()" class="w-8 h-8 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-700 flex items-center justify-center interactive-btn">
                     <i class="fa-solid fa-xmark text-base"></i>
@@ -573,10 +661,229 @@
         let initialPinchDistance = null;
         let initialScale = 1;
         let isDraggingNote = false;
+        let didDragMove = false;
         let activeNoteId = null;
         let noteStartX = 0, noteStartY = 0;
         let dragStartPointerX = 0, dragStartPointerY = 0;
         let hasInitializedView = false;
+
+        let currentMainTab = 'board';
+        let currentAccountSubTab = 'online';
+
+        // 学年に応じて学級セレクトボックスを更新（1年: 1〜5組, 2・3年: 1〜4組）
+        function updateClassOptions(gradeSelectId, classSelectId, defaultLabel) {
+            const gradeEl = document.getElementById(gradeSelectId);
+            const classEl = document.getElementById(classSelectId);
+            if (!gradeEl || !classEl) return;
+
+            const gradeVal = gradeEl.value;
+            const prevClassVal = classEl.value;
+            const maxClass = (gradeVal === '2年' || gradeVal === '3年') ? 4 : 5;
+
+            let html = `<option value="">${defaultLabel}</option>`;
+            for (let i = 1; i <= maxClass; i++) {
+                const clsName = `${i}組`;
+                html += `<option value="${clsName}">${clsName}</option>`;
+            }
+            classEl.innerHTML = html;
+
+            if (prevClassVal && parseInt(prevClassVal, 10) <= maxClass) {
+                classEl.value = prevClassVal;
+            } else {
+                classEl.value = '';
+            }
+        }
+
+        function onSearchGradeChange() {
+            updateClassOptions('grade-filter', 'class-filter', '学級すべて');
+            renderSearchList();
+        }
+
+        // メインタブ切り替え（ボード / アカウント）
+        function switchMainTab(tab) {
+            currentMainTab = tab;
+            const boardView = document.getElementById('board-view');
+            const accountView = document.getElementById('account-view');
+            const boardTopControls = document.getElementById('board-top-controls');
+            const tabBoardBtn = document.getElementById('main-tab-board');
+            const tabAccountBtn = document.getElementById('main-tab-account');
+
+            if (tab === 'board') {
+                boardView.classList.remove('hidden');
+                accountView.classList.add('hidden');
+                boardTopControls.classList.remove('hidden');
+
+                tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn';
+                tabAccountBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 text-slate-600 hover:bg-slate-100 interactive-btn';
+            } else {
+                boardView.classList.add('hidden');
+                accountView.classList.remove('hidden');
+                boardTopControls.classList.add('hidden');
+
+                tabAccountBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn';
+                tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition flex items-center space-x-2 text-slate-600 hover:bg-slate-100 interactive-btn';
+                renderAccountLists();
+            }
+        }
+
+        // アカウント画面のサブタブ切り替え（いまオンライン / ログイン済み）
+        function switchAccountSubTab(subTab) {
+            currentAccountSubTab = subTab;
+            const onlineBtn = document.getElementById('subtab-online-btn');
+            const loggedBtn = document.getElementById('subtab-logged-btn');
+            const onlinePanel = document.getElementById('account-online-panel');
+            const loggedPanel = document.getElementById('account-logged-panel');
+
+            if (subTab === 'online') {
+                onlinePanel.classList.remove('hidden');
+                loggedPanel.classList.add('hidden');
+
+                onlineBtn.className = 'py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn';
+                loggedBtn.className = 'py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 text-slate-600 hover:bg-slate-50 interactive-btn';
+            } else {
+                onlinePanel.classList.add('hidden');
+                loggedPanel.classList.remove('hidden');
+
+                loggedBtn.className = 'py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn';
+                onlineBtn.className = 'py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 text-slate-600 hover:bg-slate-50 interactive-btn';
+            }
+        }
+
+        function renderAccountLists() {
+            const onlinePanel = document.getElementById('account-online-panel');
+            const loggedPanel = document.getElementById('account-logged-panel');
+            const onlineBadge = document.getElementById('online-count-badge');
+            const loggedBadge = document.getElementById('logged-count-badge');
+            if (!onlinePanel || !loggedPanel) return;
+
+            // Firestore上のユーザー・ローカルセッション・付箋投稿者情報を統合して重複排除
+            const userMap = new Map();
+
+            (window.loginSessions || []).forEach(u => {
+                if (u.uid) userMap.set(u.uid, { ...u });
+            });
+
+            (window.notesData || []).forEach(n => {
+                if (n.creatorId && !userMap.has(n.creatorId)) {
+                    userMap.set(n.creatorId, {
+                        uid: n.creatorId,
+                        displayName: n.userName || n.author || 'ユーザー',
+                        email: n.userEmail || '',
+                        photoURL: n.userPhoto || '',
+                        isOnline: false,
+                        lastLoginAt: n.createdAt || null,
+                        lastActiveAt: n.createdAt || null
+                    });
+                }
+            });
+
+            (window.usersData || []).forEach(u => {
+                if (u.uid) {
+                    const existing = userMap.get(u.uid) || {};
+                    userMap.set(u.uid, { ...existing, ...u });
+                }
+            });
+
+            if (window.currentUser && window.currentUser.uid) {
+                const existing = userMap.get(window.currentUser.uid) || {};
+                userMap.set(window.currentUser.uid, {
+                    ...existing,
+                    ...window.currentUser,
+                    isOnline: true,
+                    lastActiveAt: new Date().toISOString()
+                });
+            }
+
+            const nowMs = Date.now();
+            const allUsers = Array.from(userMap.values()).map(u => {
+                const lastActiveMs = u.lastActiveAt ? new Date(u.lastActiveAt).getTime() : 0;
+                const isRecentlyActive = (nowMs - lastActiveMs) < 90000; // 90秒以内にアクティブならオンライン扱い
+                const isSelf = window.currentUser && u.uid === window.currentUser.uid;
+                return {
+                    ...u,
+                    effectivelyOnline: Boolean(isSelf || (u.isOnline && isRecentlyActive))
+                };
+            });
+
+            // 最終アクティブ順でソート
+            allUsers.sort((a, b) => {
+                const ta = a.lastActiveAt ? new Date(a.lastActiveAt).getTime() : 0;
+                const tb = b.lastActiveAt ? new Date(b.lastActiveAt).getTime() : 0;
+                return tb - ta;
+            });
+
+            const onlineUsers = allUsers.filter(u => u.effectivelyOnline);
+
+            if (onlineBadge) onlineBadge.innerText = onlineUsers.length;
+            if (loggedBadge) loggedBadge.innerText = allUsers.length;
+
+            if (onlineUsers.length === 0) {
+                onlinePanel.innerHTML = `
+                    <div class="bg-white rounded-3xl border border-slate-200 p-8 text-center text-slate-400">
+                        <i class="fa-solid fa-user-clock text-2xl mb-2 block"></i>
+                        <p class="text-xs">現在オンラインのユーザーはいません</p>
+                    </div>
+                `;
+            } else {
+                onlinePanel.innerHTML = onlineUsers.map(u => createAccountCardHtml(u, true)).join('');
+            }
+
+            if (allUsers.length === 0) {
+                loggedPanel.innerHTML = `
+                    <div class="bg-white rounded-3xl border border-slate-200 p-8 text-center text-slate-400">
+                        <i class="fa-regular fa-address-book text-2xl mb-2 block"></i>
+                        <p class="text-xs">ログイン済みのアカウントはまだありません</p>
+                    </div>
+                `;
+            } else {
+                loggedPanel.innerHTML = allUsers.map(u => createAccountCardHtml(u, false)).join('');
+            }
+        }
+
+        function createAccountCardHtml(user, forceOnlineBadge) {
+            const isSelf = window.currentUser && user.uid === window.currentUser.uid;
+            const initial = (user.displayName || 'U')[0];
+            const avatarHtml = user.photoURL
+                ? `<img src="${user.photoURL}" class="w-11 h-11 rounded-full object-cover border border-slate-200 shrink-0">`
+                : `<div class="w-11 h-11 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shrink-0">${escapeHtml(initial)}</div>`;
+
+            const statusDot = user.effectivelyOnline
+                ? `<span class="w-3 h-3 rounded-full bg-emerald-500 ring-2 ring-white absolute bottom-0 right-0"></span>`
+                : `<span class="w-3 h-3 rounded-full bg-slate-300 ring-2 ring-white absolute bottom-0 right-0"></span>`;
+
+            const timeLabel = user.lastLoginAt
+                ? `最終ログイン: ${new Date(user.lastLoginAt).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
+                : 'ログイン履歴あり';
+
+            const emailLine = (window.isAdminMode && user.email)
+                ? `<p class="text-[11px] text-slate-400 truncate">${escapeHtml(user.email)}</p>`
+                : '';
+
+            return `
+                <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between gap-3">
+                    <div class="flex items-center space-x-3 min-w-0">
+                        <div class="relative shrink-0">
+                            ${avatarHtml}
+                            ${statusDot}
+                        </div>
+                        <div class="min-w-0">
+                            <div class="flex items-center space-x-1.5">
+                                <p class="font-bold text-slate-800 text-xs sm:text-sm truncate">${escapeHtml(user.displayName || '名無しさん')}</p>
+                                ${isSelf ? '<span class="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full font-bold shrink-0">あなた</span>' : ''}
+                            </div>
+                            ${emailLine}
+                            <p class="text-[11px] text-slate-400 truncate">${timeLabel}</p>
+                        </div>
+                    </div>
+                    <div class="shrink-0">
+                        ${user.effectivelyOnline
+                            ? '<span class="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">オンライン</span>'
+                            : '<span class="text-[11px] font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">オフライン</span>'
+                        }
+                    </div>
+                </div>
+            `;
+        }
 
         function initCanvas() {
             const viewport = document.getElementById('viewport');
@@ -755,9 +1062,9 @@
             updateTransform();
         }
 
+        // 「中央へ」ボタン：一番最初の状態のように付箋全部が映り込む状態へ移動
         function resetView() {
-            scale = 1.0;
-            resetViewCenter();
+            fitAllNotes(true);
         }
 
         function renderNotes() {
@@ -776,6 +1083,11 @@
                     div.style.cursor = 'pointer';
                     div.onclick = (e) => {
                         if (e.target.closest('button')) return;
+                        // ドラッグ移動した直後はクリック判定にしない
+                        if (didDragMove) {
+                            didDragMove = false;
+                            return;
+                        }
                         openAdminDetailModalForNote(note.id);
                     };
                 }
@@ -810,8 +1122,8 @@
                             ${actionButtonsHtml}
                         </div>
                     </div>
-                    <div class="p-4 flex-1 flex flex-col justify-between pointer-events-none" onpointerdown="startDragNote(event, '${note.id}')">
-                        <p class="text-xs sm:text-sm text-slate-700 whitespace-pre-wrap leading-relaxed pointer-events-auto">${escapeHtml(note.content)}</p>
+                    <div class="p-4 flex-1 flex flex-col justify-between" onpointerdown="startDragNote(event, '${note.id}')">
+                        <p class="text-xs sm:text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">${escapeHtml(note.content)}</p>
                         <div class="mt-3 pt-2 border-t border-black/5 flex items-center justify-between text-[11px] text-slate-500 font-medium">
                             <span class="truncate max-w-[220px] flex items-center">${userAvatarHtml}${escapeHtml(displayAuthor)}</span>
                             ${(isLoggedIn && note.creatorId === window.myCreatorId) ? '<span class="text-[9px] bg-indigo-600/10 text-indigo-700 px-1.5 py-0.5 rounded-md font-semibold">あなたの投稿</span>' : ''}
@@ -824,6 +1136,7 @@
             if (!hasInitializedView && window.notesData.length > 0) {
                 fitAllNotes(false);
             }
+            if (typeof renderAccountLists === 'function') renderAccountLists();
         }
 
         function openAdminDetailModalForNote(noteId) {
@@ -940,6 +1253,7 @@
         function clearSearchFilters() {
             document.getElementById('search-input').value = '';
             document.getElementById('grade-filter').value = '';
+            updateClassOptions('grade-filter', 'class-filter', '学級すべて');
             document.getElementById('class-filter').value = '';
             renderSearchList();
         }
@@ -1008,6 +1322,7 @@
             if (!note) return;
 
             closeSearchModal();
+            if (currentMainTab !== 'board') switchMainTab('board');
             const viewport = document.getElementById('viewport');
             if (!viewport) return;
 
@@ -1032,6 +1347,7 @@
             const note = window.notesData.find(n => n.id === id);
             if (!note) return;
 
+            didDragMove = false;
             const canMove = (Boolean(window.currentUser) && note.creatorId === window.myCreatorId) || window.isAdminMode;
 
             if (!canMove) {
@@ -1049,8 +1365,18 @@
 
             const moveHandler = (moveEvent) => {
                 if (!isDraggingNote || activeNoteId !== id) return;
-                const dx = (moveEvent.clientX - dragStartPointerX) / scale;
-                const dy = (moveEvent.clientY - dragStartPointerY) / scale;
+                const rawDx = moveEvent.clientX - dragStartPointerX;
+                const rawDy = moveEvent.clientY - dragStartPointerY;
+
+                // 5px以上動かしたらドラッグ移動とみなし、離したときのクリック判定を無効化
+                if (!didDragMove && Math.hypot(rawDx, rawDy) > 5) {
+                    didDragMove = true;
+                }
+
+                if (!didDragMove) return;
+
+                const dx = rawDx / scale;
+                const dy = rawDy / scale;
                 const targetNote = window.notesData.find(n => n.id === id);
                 if (targetNote) {
                     targetNote.x = noteStartX + dx;
@@ -1063,8 +1389,12 @@
             const upHandler = () => {
                 if (isDraggingNote && activeNoteId === id) {
                     isDraggingNote = false;
-                    const targetNote = window.notesData.find(n => n.id === id);
-                    if (targetNote) saveNoteToDb(targetNote);
+                    if (didDragMove) {
+                        const targetNote = window.notesData.find(n => n.id === id);
+                        if (targetNote) saveNoteToDb(targetNote);
+                        // onclickイベントが直後に発火するのを防ぐため少し遅らせてフラグを戻す
+                        setTimeout(() => { didDragMove = false; }, 100);
+                    }
                     activeNoteId = null;
                 }
                 window.removeEventListener('pointermove', moveHandler);
@@ -1085,6 +1415,7 @@
             document.getElementById('note-title-input').value = '';
             document.getElementById('note-content-input').value = '';
             document.getElementById('note-grade-input').value = '';
+            updateClassOptions('note-grade-input', 'note-class-input', '選択');
             document.getElementById('note-class-input').value = '';
             document.getElementById('note-name-input').value = '';
             document.querySelector('input[name="note-color"][value="yellow"]').checked = true;
@@ -1103,6 +1434,7 @@
             
             const authorParts = (note.author || '').split(/[\s\-]/);
             document.getElementById('note-grade-input').value = authorParts[0] || '';
+            updateClassOptions('note-grade-input', 'note-class-input', '選択');
             document.getElementById('note-class-input').value = authorParts[1] || '';
             document.getElementById('note-name-input').value = authorParts.slice(2).join(' ') || authorParts[2] || '';
             
