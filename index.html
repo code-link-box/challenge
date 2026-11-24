@@ -30,46 +30,135 @@
         let db, auth;
         let isFirebaseConnected = false;
         let presenceInterval = null;
+        let isFirstNotesSnapshot = true;
+        let knownNoteSignatures = new Map();
 
         // ★ 編集モードの合言葉を変えたいときはこの行を変更
         const ADMIN_HASH = '#admin-administrator-()';
-        window.isAdminMode = (window.location.hash === ADMIN_HASH);
+
+        function parseModeFromHash() {
+            const h = (window.location.hash || '').trim();
+            const isMonitorAuto = (h === '#monitor-auto');
+            const isMonitor = (h === '#monitor' || isMonitorAuto);
+            const isAdmin = (!isMonitor && h === ADMIN_HASH);
+            return { isAdmin, isMonitor, isMonitorAuto };
+        }
+
+        const initialMode = parseModeFromHash();
+        window.isAdminMode = initialMode.isAdmin;
+        window.isMonitorMode = initialMode.isMonitor;
+        window.isMonitorAuto = initialMode.isMonitorAuto;
+
         window.notesData = [];
         window.usersData = [];
         window.auditLogsData = [];
         window.currentUser = null;
         window.loginSessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
+        window.forcedLogoutUids = new Set(JSON.parse(localStorage.getItem('freeboard_forced_logout_uids') || '[]'));
 
-        window.applyAdminModeUI = function() {
-            window.isAdminMode = (window.location.hash === ADMIN_HASH);
+        function isUidForceLoggedOut(uid) {
+            if (!uid) return false;
+            if (window.forcedLogoutUids && window.forcedLogoutUids.has(uid)) return true;
+            const userDoc = (window.usersData || []).find(u => u.uid === uid);
+            return Boolean(userDoc && userDoc.forceLogout);
+        }
+
+        window.applyModeUI = function() {
+            const mode = parseModeFromHash();
+            window.isAdminMode = mode.isAdmin;
+            window.isMonitorMode = mode.isMonitor;
+            window.isMonitorAuto = mode.isMonitorAuto;
+
+            const headerEl = document.getElementById('main-header');
             const subTitleEl = document.getElementById('header-subtitle');
             const historyBtn = document.getElementById('admin-history-btn');
             const bottomNav = document.getElementById('bottom-mode-tabs');
+            const plusFab = document.getElementById('plus-button-container');
+            const loginModal = document.getElementById('login-modal');
+            const searchModal = document.getElementById('search-modal');
+            const noteModal = document.getElementById('note-modal');
+            const historyModal = document.getElementById('history-modal');
+            const adminDetailModal = document.getElementById('admin-detail-modal');
 
-            if (window.isAdminMode) {
-                if (subTitleEl) {
-                    subTitleEl.innerText = '編集モード';
-                    subTitleEl.className = 'text-[10px] font-bold text-indigo-600 block leading-tight';
-                }
-                if (historyBtn) historyBtn.classList.remove('hidden');
-                if (bottomNav) bottomNav.classList.remove('hidden');
-            } else {
-                if (subTitleEl) {
-                    subTitleEl.innerText = '';
-                    subTitleEl.className = 'text-[10px] text-slate-400 leading-tight';
-                }
-                if (historyBtn) historyBtn.classList.add('hidden');
+            if (window.isMonitorMode) {
+                if (headerEl) headerEl.classList.add('hidden');
                 if (bottomNav) bottomNav.classList.add('hidden');
-                if (typeof switchMainTab === 'function' && typeof currentMainTab !== 'undefined' && currentMainTab !== 'board') {
-                    switchMainTab('board');
+                if (plusFab) plusFab.classList.add('hidden');
+                if (loginModal) loginModal.classList.add('hidden');
+                if (searchModal) searchModal.classList.add('hidden');
+                if (noteModal) noteModal.classList.add('hidden');
+                if (historyModal) historyModal.classList.add('hidden');
+                if (adminDetailModal) adminDetailModal.classList.add('hidden');
+
+                const boardView = document.getElementById('board-view');
+                const accountView = document.getElementById('account-view');
+                if (boardView) boardView.classList.remove('hidden');
+                if (accountView) accountView.classList.add('hidden');
+
+                if (typeof startMonitorAutoCycle === 'function') startMonitorAutoCycle();
+                if (typeof fitAllNotes === 'function') fitAllNotes(true);
+            } else {
+                if (typeof stopMonitorAutoCycle === 'function') stopMonitorAutoCycle();
+                if (typeof clearMonitorFocus === 'function') clearMonitorFocus();
+                if (headerEl) headerEl.classList.remove('hidden');
+                if (plusFab) plusFab.classList.remove('hidden');
+
+                if (window.isAdminMode) {
+                    if (subTitleEl) {
+                        subTitleEl.innerText = '編集モード';
+                        subTitleEl.className = 'text-[10px] font-bold text-indigo-600 block leading-tight';
+                    }
+                    if (historyBtn) historyBtn.classList.remove('hidden');
+                    if (bottomNav) bottomNav.classList.remove('hidden');
+                } else {
+                    if (subTitleEl) {
+                        subTitleEl.innerText = '';
+                        subTitleEl.className = 'text-[10px] text-slate-400 leading-tight';
+                    }
+                    if (historyBtn) historyBtn.classList.add('hidden');
+                    if (bottomNav) bottomNav.classList.add('hidden');
+                    if (typeof switchMainTab === 'function' && typeof currentMainTab !== 'undefined' && currentMainTab !== 'board') {
+                        switchMainTab('board');
+                    }
                 }
             }
         };
 
         window.addEventListener('hashchange', () => {
-            window.applyAdminModeUI();
+            window.applyModeUI();
             if (typeof renderNotes === 'function') renderNotes();
         });
+
+        function detectAndHighlightMonitorChanges(notes) {
+            const nextMap = new Map();
+            const changedOrNewIds = [];
+
+            notes.forEach(n => {
+                const sig = JSON.stringify({
+                    title: n.title || '',
+                    content: n.content || '',
+                    author: n.author || '',
+                    color: n.color || 'yellow',
+                    updatedAt: n.updatedAt || '',
+                    createdAt: n.createdAt || ''
+                });
+                nextMap.set(n.id, sig);
+
+                if (!isFirstNotesSnapshot) {
+                    const prevSig = knownNoteSignatures.get(n.id);
+                    if (prevSig !== sig) {
+                        changedOrNewIds.push(n.id);
+                    }
+                }
+            });
+
+            knownNoteSignatures = nextMap;
+            isFirstNotesSnapshot = false;
+
+            if (window.isMonitorMode && changedOrNewIds.length > 0 && typeof spotlightNoteForMonitor === 'function') {
+                spotlightNoteForMonitor(changedOrNewIds[0], 60000);
+            }
+        }
 
         window.initFirebase = async function() {
             const btn = document.getElementById('google-login-btn');
@@ -86,17 +175,17 @@
                 try {
                     const result = await getRedirectResult(auth);
                     if (result && result.user) {
-                        handleSuccessfulUser(result.user);
+                        await handleSuccessfulUser(result.user);
                     }
                 } catch (redirectErr) {
                     console.warn("Redirect result info:", redirectErr);
                 }
 
-                onAuthStateChanged(auth, (user) => {
+                onAuthStateChanged(auth, async (user) => {
                     if (user && !user.isAnonymous) {
-                        handleSuccessfulUser(user);
+                        await handleSuccessfulUser(user);
                     } else {
-                        if (!window.currentUser) {
+                        if (!window.currentUser && !window.isMonitorMode) {
                             openLoginModal();
                         }
                     }
@@ -115,6 +204,7 @@
                     });
 
                     window.notesData = notes;
+                    detectAndHighlightMonitorChanges(notes);
                     if (typeof renderNotes === 'function') renderNotes();
                     if (typeof renderSearchList === 'function') renderSearchList();
                 }, (error) => {
@@ -122,14 +212,24 @@
                     fallbackToLocal();
                 });
 
-                // ユーザー一覧・オンライン状態のリアルタイム同期
+                // ユーザー一覧・オンライン状態・強制ログアウト状態のリアルタイム同期
                 const usersColRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
-                onSnapshot(usersColRef, (snapshot) => {
+                onSnapshot(usersColRef, async (snapshot) => {
                     const users = [];
                     snapshot.forEach(docSnap => {
                         users.push({ uid: docSnap.id, ...docSnap.data() });
                     });
                     window.usersData = users;
+
+                    // 自分が強制ログアウトされた場合、サインアウトして再ログインを促す
+                    if (window.currentUser && window.currentUser.uid) {
+                        const me = users.find(u => u.uid === window.currentUser.uid);
+                        if (me && me.forceLogout) {
+                            await forceSignOutCurrentUser();
+                            return;
+                        }
+                    }
+
                     if (typeof renderAccountLists === 'function') renderAccountLists();
                 }, (error) => {
                     console.warn("Users sync warning:", error);
@@ -177,10 +277,9 @@
             localLogs.unshift(logEntry);
             localStorage.setItem('freeboard_local_logs', JSON.stringify(localLogs.slice(0, 200)));
 
-            if (!isFirebaseConnected || !db) {
-                window.auditLogsData = localLogs;
-                if (typeof renderHistoryList === 'function') renderHistoryList();
-            }
+            window.auditLogsData = [logEntry, ...(window.auditLogsData || []).filter(l => l.id !== logEntry.id)];
+            window.auditLogsData.sort((a, b) => new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime());
+            if (typeof renderHistoryList === 'function') renderHistoryList();
 
             if (isFirebaseConnected && db) {
                 try {
@@ -191,7 +290,7 @@
             }
         };
 
-        async function syncUserPresence(user, isOnline) {
+        async function syncUserPresence(user, isOnline, extraFields = {}) {
             if (!user) return;
             const now = new Date().toISOString();
             const userPayload = {
@@ -200,8 +299,10 @@
                 email: user.email || '',
                 photoURL: user.photoURL || '',
                 isOnline: isOnline,
+                forceLogout: false,
                 lastLoginAt: user.lastLoginAt || now,
-                lastActiveAt: now
+                lastActiveAt: now,
+                ...extraFields
             };
 
             const sessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
@@ -233,7 +334,25 @@
             }, 30000);
         }
 
-        function handleSuccessfulUser(user) {
+        async function forceSignOutCurrentUser() {
+            if (presenceInterval) clearInterval(presenceInterval);
+            try {
+                if (auth) await signOut(auth);
+            } catch (e) {
+                console.warn("Sign out error:", e);
+            }
+            window.currentUser = null;
+            updateUserIconUI();
+            if (!window.isMonitorMode) {
+                openLoginModal();
+            }
+        }
+
+        async function handleSuccessfulUser(user) {
+            if (isUidForceLoggedOut(user.uid)) {
+                await forceSignOutCurrentUser();
+                return;
+            }
             const now = new Date().toISOString();
             window.currentUser = {
                 uid: user.uid,
@@ -244,7 +363,7 @@
             };
             window.myCreatorId = user.uid;
 
-            syncUserPresence(window.currentUser, true);
+            await syncUserPresence(window.currentUser, true, { forceLogout: false });
             startPresenceHeartbeat();
             updateUserIconUI();
             closeLoginModal();
@@ -260,6 +379,14 @@
                 syncUserPresence(window.currentUser, false);
             }
         });
+
+        function resetLoginButtonUI() {
+            const btn = document.getElementById('google-login-btn');
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<div class="bg-white p-1 rounded-full"><svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg></div><span class="text-sm">Googleアカウントでログイン</span>';
+            }
+        }
 
         window.googleLogin = async function() {
             const btn = document.getElementById('google-login-btn');
@@ -278,10 +405,7 @@
             } catch (e) {
                 console.error("Google Login failed:", e);
                 alert("ログインに失敗しました。\nエラー: " + e.message);
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerHTML = '<div class="bg-white p-1 rounded-full"><svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg></div><span class="text-sm">Googleアカウントでログイン</span>';
-                }
+                resetLoginButtonUI();
             }
         };
 
@@ -290,23 +414,56 @@
                 try {
                     if (presenceInterval) clearInterval(presenceInterval);
                     if (window.currentUser) {
-                        await syncUserPresence(window.currentUser, false);
+                        await syncUserPresence(window.currentUser, false, { forceLogout: false });
                     }
                     await signOut(auth);
                     window.currentUser = null;
                     updateUserIconUI();
-
-                    const btn = document.getElementById('google-login-btn');
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.innerHTML = '<div class="bg-white p-1 rounded-full"><svg class="w-4 h-4" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg></div><span class="text-sm">Googleアカウントでログイン</span>';
-                    }
-
+                    resetLoginButtonUI();
                     openLoginModal();
                 } catch(e) {
                     console.error("Logout failed:", e);
                 }
             }
+        };
+
+        // アカウント一覧のゴミ箱ボタンから対象アカウントをログアウトさせる（再ログイン必須化）
+        window.kickAccountToReLogin = async function(targetUid, targetName) {
+            if (!window.isAdminMode || !targetUid) return;
+            const label = targetName ? `${targetName} さん` : 'このアカウント';
+            if (!confirm(`${label} をログアウトさせますか？再度ログインが必要になります。`)) return;
+
+            window.forcedLogoutUids.add(targetUid);
+            localStorage.setItem('freeboard_forced_logout_uids', JSON.stringify(Array.from(window.forcedLogoutUids)));
+
+            const sessions = (window.loginSessions || []).map(s =>
+                s.uid === targetUid ? { ...s, isOnline: false, forceLogout: true } : s
+            );
+            window.loginSessions = sessions;
+            localStorage.setItem('freeboard_login_sessions', JSON.stringify(sessions));
+
+            window.usersData = (window.usersData || []).map(u =>
+                u.uid === targetUid ? { ...u, isOnline: false, forceLogout: true } : u
+            );
+
+            if (isFirebaseConnected && db) {
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', targetUid), {
+                        isOnline: false,
+                        forceLogout: true,
+                        forcedLogoutAt: new Date().toISOString()
+                    }, { merge: true });
+                } catch (e) {
+                    console.warn("Failed to update forceLogout in Firestore:", e);
+                }
+            }
+
+            if (window.currentUser && window.currentUser.uid === targetUid) {
+                await forceSignOutCurrentUser();
+                return;
+            }
+
+            if (typeof renderAccountLists === 'function') renderAccountLists();
         };
 
         function fallbackToLocal() {
@@ -317,7 +474,7 @@
             const savedLogs = localStorage.getItem('freeboard_local_logs');
             window.auditLogsData = savedLogs ? JSON.parse(savedLogs) : [];
 
-            if (!window.currentUser) {
+            if (!window.currentUser && !window.isMonitorMode) {
                 openLoginModal();
             }
 
@@ -422,7 +579,7 @@
         }
 
         window.onload = () => {
-            window.applyAdminModeUI();
+            window.applyModeUI();
             window.initFirebase();
             if (typeof initCanvas === 'function') initCanvas();
             if (typeof renderAccountLists === 'function') renderAccountLists();
@@ -448,6 +605,10 @@
         .sticky-note {
             box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.12), 0 8px 10px -6px rgba(0, 0, 0, 0.08);
             touch-action: none;
+            transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        .sticky-note.no-anim {
+            transition: none;
         }
         .interactive-btn {
             touch-action: manipulation;
@@ -468,7 +629,7 @@
 </head>
 <body class="w-screen h-screen relative">
 
-    <header class="absolute top-3 left-3 right-3 z-30 flex items-center justify-between pointer-events-none gap-2">
+    <header id="main-header" class="absolute top-3 left-3 right-3 z-30 flex items-center justify-between pointer-events-none gap-2">
         <!-- Title Box + History Button (編集モード時のみ表示) -->
         <div class="flex items-center gap-2 pointer-events-auto shrink-0">
             <div class="bg-white/95 backdrop-blur-md px-4 py-2.5 rounded-2xl shadow-md border border-slate-200 flex items-center space-x-2.5 shrink-0">
@@ -518,11 +679,11 @@
     <!-- Board View -->
     <div id="board-view" class="w-full h-full relative">
         <div id="viewport" class="w-full h-full relative overflow-hidden canvas-bg">
-            <div id="canvas" class="absolute top-0 left-0 w-[5000px] h-[5000px] origin-top-left"></div>
+            <div id="canvas" class="absolute top-0 left-0 w-[5000px] h-[5000px] origin-top-left transition-transform duration-500 ease-out"></div>
         </div>
 
         <!-- Plus Button -->
-        <div class="absolute bottom-11 right-6 md:bottom-12 md:right-8 z-40">
+        <div id="plus-button-container" class="absolute bottom-11 right-6 md:bottom-12 md:right-8 z-40">
             <button type="button" onclick="handlePlusClick()" class="w-16 h-16 bg-indigo-600 hover:bg-indigo-700 active:scale-90 text-white rounded-full shadow-xl flex items-center justify-center text-2xl transition transform interactive-btn" title="新しい挑戦を書き込む">
                 <i class="fa-solid fa-plus"></i>
             </button>
@@ -599,7 +760,25 @@
                     <i class="fa-solid fa-xmark text-base"></i>
                 </button>
             </div>
-            <div id="history-results-list" class="p-4 overflow-y-auto space-y-3 flex-1 bg-slate-50/70 scrollable-list"></div>
+            <div id="history-results-list" class="p-4 overflow-y-auto space-y-2.5 flex-1 bg-slate-50/70 scrollable-list"></div>
+        </div>
+    </div>
+
+    <!-- History Detail Modal (履歴項目タップ時の詳細表示) -->
+    <div id="history-detail-modal" onclick="if(event.target === this) closeHistoryDetailModal()" class="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center hidden opacity-0 transition-opacity duration-200 p-4">
+        <div class="bg-white rounded-3xl shadow-2xl border border-slate-100 w-full max-w-lg max-h-[84vh] flex flex-col overflow-hidden transform scale-95 transition-transform duration-200">
+            <div class="px-5 py-4 bg-slate-50 border-b border-slate-100 flex items-center justify-between shrink-0">
+                <div class="flex items-center space-x-2">
+                    <div class="w-7 h-7 rounded-xl bg-indigo-600 text-white flex items-center justify-center text-xs">
+                        <i class="fa-solid fa-file-lines"></i>
+                    </div>
+                    <h3 class="font-bold text-slate-800 text-base">変更内容の詳細</h3>
+                </div>
+                <button type="button" onclick="closeHistoryDetailModal()" class="w-8 h-8 rounded-full hover:bg-slate-200 text-slate-400 hover:text-slate-700 flex items-center justify-center interactive-btn">
+                    <i class="fa-solid fa-xmark text-base"></i>
+                </button>
+            </div>
+            <div id="history-detail-content" class="p-5 overflow-y-auto space-y-4 flex-1 bg-slate-50/70 scrollable-list"></div>
         </div>
     </div>
 
@@ -621,7 +800,7 @@
             <div class="p-4 border-b border-slate-100 space-y-2.5 bg-white shrink-0">
                 <div class="relative">
                     <i class="fa-solid fa-magnifying-glass text-indigo-600 text-xs absolute left-3.5 top-1/2 -translate-y-1/2"></i>
-                    <input type="text" id="search-input" oninput="renderSearchList()" placeholder="キーワード・名前・タイトルで検索..." class="w-full pl-9 pr-9 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-600">
+                    <input type="text" id="search-input" oninput="renderSearchList()" class="w-full pl-9 pr-9 py-2.5 bg-slate-50 border border-slate-200 rounded-2xl text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-600">
                     <button type="button" id="clear-search-btn" onclick="clearSearchFilters()" class="hidden text-xs text-slate-400 hover:text-indigo-600 absolute right-3 top-1/2 -translate-y-1/2 px-1.5 py-0.5">
                         クリア
                     </button>
@@ -646,7 +825,7 @@
 
                 <div class="flex items-center justify-between text-[11px] text-slate-500 pt-0.5 px-1">
                     <span id="search-count-label">全 0 件の投稿</span>
-                    <span>カードをタップでボード上の場所へ移動</span>
+                    <span>タップしてカードへ移動</span>
                 </div>
             </div>
 
@@ -768,7 +947,11 @@
         let currentMainTab = 'board';
         let currentAccountSubTab = 'online';
 
-        // author文字列を「学年・学級・名前」に分解するヘルパー
+        let monitorReturnTimeout = null;
+        let monitorAutoInterval = null;
+        let monitorAutoQueue = [];
+        let monitorSpotlightNoteId = null;
+
         function parseAuthorParts(authorStr) {
             const tokens = (authorStr || '').trim().split(/[\s\u3000\-]+/).filter(Boolean);
             let grade = '';
@@ -792,7 +975,6 @@
             };
         }
 
-        // 学年に応じて学級セレクトボックスを更新（1年: 1〜5組, 2・3年: 1〜4組）
         function updateClassOptions(gradeSelectId, classSelectId, defaultLabel, preferredClass = null) {
             const gradeEl = document.getElementById(gradeSelectId);
             const classEl = document.getElementById(classSelectId);
@@ -821,7 +1003,107 @@
             renderSearchList();
         }
 
-        // 変更履歴モーダル開閉・描画・復元（編集モード時のみ）
+        // モニターモード：特定付箋へズームアップし、指定ミリ秒後に全体表示へ戻る
+        function clearMonitorFocus() {
+            if (monitorReturnTimeout) {
+                clearTimeout(monitorReturnTimeout);
+                monitorReturnTimeout = null;
+            }
+            monitorSpotlightNoteId = null;
+        }
+
+        function spotlightNoteForMonitor(noteId, durationMs = 60000) {
+            if (!window.isMonitorMode) return;
+            const note = (window.notesData || []).find(n => n.id === noteId);
+            if (!note) return;
+
+            const viewport = document.getElementById('viewport');
+            if (!viewport || viewport.clientWidth === 0 || viewport.clientHeight === 0) return;
+
+            if (monitorReturnTimeout) {
+                clearTimeout(monitorReturnTimeout);
+                monitorReturnTimeout = null;
+            }
+
+            monitorSpotlightNoteId = note.id;
+
+            const noteWidth = 270;
+            const noteHeight = 200;
+            const targetScale = Math.max(
+                0.6,
+                Math.min(
+                    2.2,
+                    Math.min((viewport.clientWidth * 0.65) / noteWidth, (viewport.clientHeight * 0.65) / noteHeight)
+                )
+            );
+
+            scale = targetScale;
+            const cx = note.x + noteWidth / 2;
+            const cy = note.y + noteHeight / 2;
+            panX = (viewport.clientWidth / 2) - cx * scale;
+            panY = (viewport.clientHeight / 2) - cy * scale;
+            updateTransform();
+            updateMonitorHighlightClasses();
+
+            monitorReturnTimeout = setTimeout(() => {
+                monitorSpotlightNoteId = null;
+                updateMonitorHighlightClasses();
+                if (window.isMonitorMode) {
+                    fitAllNotes(true);
+                }
+            }, durationMs);
+        }
+
+        function refillRandomMonitorQueue() {
+            const ids = (window.notesData || []).map(n => n.id);
+            for (let i = ids.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [ids[i], ids[j]] = [ids[j], ids[i]];
+            }
+            monitorAutoQueue = ids;
+        }
+
+        function stepMonitorAuto() {
+            if (!window.isMonitorMode || !window.isMonitorAuto) return;
+            const validIds = new Set((window.notesData || []).map(n => n.id));
+            monitorAutoQueue = monitorAutoQueue.filter(id => validIds.has(id));
+            if (monitorAutoQueue.length === 0) {
+                refillRandomMonitorQueue();
+            }
+            const nextId = monitorAutoQueue.shift();
+            if (nextId) {
+                spotlightNoteForMonitor(nextId, 30000);
+            }
+        }
+
+        function startMonitorAutoCycle() {
+            stopMonitorAutoCycle();
+            if (!window.isMonitorMode || !window.isMonitorAuto) return;
+            refillRandomMonitorQueue();
+            stepMonitorAuto();
+            monitorAutoInterval = setInterval(() => {
+                stepMonitorAuto();
+            }, 30000);
+        }
+
+        function stopMonitorAutoCycle() {
+            if (monitorAutoInterval) {
+                clearInterval(monitorAutoInterval);
+                monitorAutoInterval = null;
+            }
+        }
+
+        function updateMonitorHighlightClasses() {
+            document.querySelectorAll('.sticky-note').forEach(el => {
+                if (window.isMonitorMode && monitorSpotlightNoteId && el.id === `note-${monitorSpotlightNoteId}`) {
+                    el.classList.add('ring-4', 'ring-indigo-600');
+                } else {
+                    el.classList.remove('ring-4', 'ring-indigo-600');
+                }
+            });
+        }
+
+        // 変更履歴モーダル開閉・描画・詳細表示・復元（編集モード時のみ）
         function openHistoryModal() {
             if (!window.isAdminMode) return;
             renderHistoryList();
@@ -830,6 +1112,13 @@
 
         function closeHistoryModal() {
             closeModalById('history-modal');
+        }
+
+        function getActionLabel(action) {
+            if (action === 'delete') return '削除';
+            if (action === 'edit') return '編集';
+            if (action === 'restore') return '復元';
+            return '作成';
         }
 
         function renderHistoryList() {
@@ -851,83 +1140,127 @@
                 const snap = log.noteSnapshot || log.beforeSnapshot || {};
                 const colors = colorMap[snap.color] || colorMap.yellow;
                 const timeStr = log.timestamp ? new Date(log.timestamp).toLocaleString('ja-JP') : '時刻不明';
+                const actor = log.actorName || snap.userName || snap.author || 'だれか';
 
                 let badgeHtml = '';
-                let detailHtml = '';
+                let summaryText = '';
 
                 if (log.action === 'delete') {
-                    badgeHtml = `<span class="text-[11px] font-bold bg-rose-100 text-rose-700 px-2.5 py-0.5 rounded-full">削除</span>`;
-                    detailHtml = `
-                        <p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(snap.title || '無題')}</p>
-                        <p class="text-xs text-slate-700 whitespace-pre-wrap bg-white/80 p-2.5 rounded-xl border border-black/5">${escapeHtml(snap.content || '')}</p>
-                    `;
+                    badgeHtml = `<span class="text-[11px] font-bold bg-rose-100 text-rose-700 px-2.5 py-0.5 rounded-full shrink-0">削除</span>`;
+                    summaryText = `${actor}が削除しました`;
                 } else if (log.action === 'edit') {
-                    badgeHtml = `<span class="text-[11px] font-bold bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-full">編集</span>`;
-                    const beforeTitle = log.beforeSnapshot ? (log.beforeSnapshot.title || '無題') : '無題';
-                    const afterTitle = log.noteSnapshot ? (log.noteSnapshot.title || '無題') : '無題';
-                    const beforeContent = log.beforeSnapshot ? (log.beforeSnapshot.content || '') : '';
-                    const afterContent = log.noteSnapshot ? (log.noteSnapshot.content || '') : '';
-                    const titleChanged = beforeTitle !== afterTitle;
-                    const contentChanged = beforeContent !== afterContent;
-
-                    detailHtml = `
-                        ${titleChanged
-                            ? `<p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(beforeTitle)} <span class="text-slate-400 font-normal">→</span> ${escapeHtml(afterTitle)}</p>`
-                            : `<p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(afterTitle)}</p>`
-                        }
-                        ${contentChanged ? `
-                            <div class="space-y-1.5">
-                                <div class="text-[11px] text-slate-500 bg-white/70 p-2 rounded-xl border border-black/5">
-                                    <span class="font-bold text-rose-600 block mb-0.5">変更前:</span>
-                                    <span class="whitespace-pre-wrap">${escapeHtml(beforeContent)}</span>
-                                </div>
-                                <div class="text-[11px] text-slate-700 bg-white/90 p-2 rounded-xl border border-black/5">
-                                    <span class="font-bold text-emerald-700 block mb-0.5">変更後:</span>
-                                    <span class="whitespace-pre-wrap">${escapeHtml(afterContent)}</span>
-                                </div>
-                            </div>
-                        ` : `
-                            <p class="text-xs text-slate-700 whitespace-pre-wrap bg-white/80 p-2.5 rounded-xl border border-black/5">${escapeHtml(afterContent)}</p>
-                        `}
-                    `;
+                    badgeHtml = `<span class="text-[11px] font-bold bg-amber-100 text-amber-800 px-2.5 py-0.5 rounded-full shrink-0">編集</span>`;
+                    summaryText = `${actor}が編集しました`;
                 } else if (log.action === 'restore') {
-                    badgeHtml = `<span class="text-[11px] font-bold bg-indigo-100 text-indigo-700 px-2.5 py-0.5 rounded-full">復元</span>`;
-                    detailHtml = `
-                        <p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(snap.title || '無題')}</p>
-                        <p class="text-xs text-slate-700 whitespace-pre-wrap bg-white/80 p-2.5 rounded-xl border border-black/5">${escapeHtml(snap.content || '')}</p>
-                    `;
+                    badgeHtml = `<span class="text-[11px] font-bold bg-indigo-100 text-indigo-700 px-2.5 py-0.5 rounded-full shrink-0">復元</span>`;
+                    summaryText = `${actor}が復元しました`;
                 } else {
-                    badgeHtml = `<span class="text-[11px] font-bold bg-emerald-100 text-emerald-700 px-2.5 py-0.5 rounded-full">作成</span>`;
-                    detailHtml = `
-                        <p class="text-xs font-bold text-slate-800 mb-1">${escapeHtml(snap.title || '無題')}</p>
-                        <p class="text-xs text-slate-700 whitespace-pre-wrap bg-white/80 p-2.5 rounded-xl border border-black/5">${escapeHtml(snap.content || '')}</p>
-                    `;
+                    badgeHtml = `<span class="text-[11px] font-bold bg-emerald-100 text-emerald-700 px-2.5 py-0.5 rounded-full shrink-0">作成</span>`;
+                    summaryText = `${actor}が作成しました`;
                 }
 
-                const canRestore = (log.action === 'delete' || log.action === 'edit') && (log.beforeSnapshot || log.noteSnapshot);
-                const restoreBtnHtml = canRestore ? `
-                    <button type="button" onclick="restoreNoteFromLog('${log.id}')" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold rounded-xl shadow-sm transition active:scale-95 interactive-btn">
-                        ボードに復元
-                    </button>
-                ` : '';
-
                 return `
-                    <div class="p-3.5 rounded-2xl border ${colors.border} ${colors.bg} space-y-2 shadow-sm">
-                        <div class="flex items-center justify-between gap-2">
-                            <div class="flex items-center space-x-2">
-                                ${badgeHtml}
-                                <span class="text-xs font-bold text-slate-800">${escapeHtml(log.actorName || 'ユーザー')}</span>
+                    <div onclick="openHistoryDetailModal('${log.id}')" class="p-3.5 rounded-2xl border ${colors.border} ${colors.bg} cursor-pointer hover:shadow-md active:scale-[0.99] transition flex items-center justify-between gap-3">
+                        <div class="flex items-center space-x-2.5 min-w-0">
+                            ${badgeHtml}
+                            <div class="min-w-0">
+                                <p class="text-xs sm:text-sm font-bold text-slate-800 truncate">${escapeHtml(summaryText)}</p>
+                                <p class="text-[11px] text-slate-500 truncate">${escapeHtml(snap.title || '無題')} ・ ${timeStr}</p>
                             </div>
-                            <span class="text-[11px] text-slate-500">${timeStr}</span>
                         </div>
-                        ${detailHtml}
-                        <div class="flex items-center justify-between pt-1">
-                            <span class="text-[11px] text-slate-500">${escapeHtml(snap.author || '')}</span>
-                            ${restoreBtnHtml}
-                        </div>
+                        <i class="fa-solid fa-chevron-right text-xs text-slate-400 shrink-0"></i>
                     </div>
                 `;
             }).join('');
+        }
+
+        function openHistoryDetailModal(logId) {
+            if (!window.isAdminMode) return;
+            const log = (window.auditLogsData || []).find(l => l.id === logId);
+            if (!log) return;
+
+            const container = document.getElementById('history-detail-content');
+            if (!container) return;
+
+            const beforeSnap = log.beforeSnapshot || null;
+            const afterSnap = log.noteSnapshot || null;
+            const primarySnap = afterSnap || beforeSnap || {};
+            const actor = log.actorName || primarySnap.userName || primarySnap.author || 'だれか';
+            const timeStr = log.timestamp ? new Date(log.timestamp).toLocaleString('ja-JP') : '時刻不明';
+
+            let actionSentence = `${actor}が${getActionLabel(log.action)}しました`;
+            let bodyDetailHtml = '';
+
+            if (log.action === 'delete') {
+                const delSnap = beforeSnap || afterSnap || {};
+                bodyDetailHtml = `
+                    <div class="bg-white p-4 rounded-2xl border border-rose-200 space-y-2">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold text-rose-700">削除された付箋</span>
+                            <span class="text-[11px] text-slate-400">${escapeHtml(delSnap.author || delSnap.userName || '匿名')}</span>
+                        </div>
+                        <p class="text-sm font-bold text-slate-800">${escapeHtml(delSnap.title || '無題')}</p>
+                        <p class="text-xs sm:text-sm text-slate-700 whitespace-pre-wrap bg-rose-50/50 p-3 rounded-xl border border-rose-100">${escapeHtml(delSnap.content || '')}</p>
+                    </div>
+                `;
+            } else if (log.action === 'edit') {
+                const bTitle = beforeSnap ? (beforeSnap.title || '無題') : '無題';
+                const aTitle = afterSnap ? (afterSnap.title || '無題') : '無題';
+                const bAuthor = beforeSnap ? (beforeSnap.author || beforeSnap.userName || '匿名') : '匿名';
+                const aAuthor = afterSnap ? (afterSnap.author || afterSnap.userName || '匿名') : '匿名';
+                const bContent = beforeSnap ? (beforeSnap.content || '') : '';
+                const aContent = afterSnap ? (afterSnap.content || '') : '';
+
+                bodyDetailHtml = `
+                    <div class="bg-white p-4 rounded-2xl border border-slate-200 space-y-2.5">
+                        <p class="text-xs font-bold text-rose-600">変更前</p>
+                        <p class="text-xs font-bold text-slate-800">タイトル: ${escapeHtml(bTitle)}</p>
+                        <p class="text-[11px] text-slate-500">投稿者: ${escapeHtml(bAuthor)}</p>
+                        <p class="text-xs sm:text-sm text-slate-700 whitespace-pre-wrap bg-slate-50 p-3 rounded-xl border border-slate-100">${escapeHtml(bContent)}</p>
+                    </div>
+                    <div class="bg-white p-4 rounded-2xl border border-slate-200 space-y-2.5">
+                        <p class="text-xs font-bold text-emerald-700">変更後</p>
+                        <p class="text-xs font-bold text-slate-800">タイトル: ${escapeHtml(aTitle)}</p>
+                        <p class="text-[11px] text-slate-500">投稿者: ${escapeHtml(aAuthor)}</p>
+                        <p class="text-xs sm:text-sm text-slate-700 whitespace-pre-wrap bg-emerald-50/40 p-3 rounded-xl border border-emerald-100">${escapeHtml(aContent)}</p>
+                    </div>
+                `;
+            } else {
+                bodyDetailHtml = `
+                    <div class="bg-white p-4 rounded-2xl border border-slate-200 space-y-2">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-bold text-indigo-700">対象付箋</span>
+                            <span class="text-[11px] text-slate-400">${escapeHtml(primarySnap.author || primarySnap.userName || '匿名')}</span>
+                        </div>
+                        <p class="text-sm font-bold text-slate-800">${escapeHtml(primarySnap.title || '無題')}</p>
+                        <p class="text-xs sm:text-sm text-slate-700 whitespace-pre-wrap bg-slate-50 p-3 rounded-xl border border-slate-100">${escapeHtml(primarySnap.content || '')}</p>
+                    </div>
+                `;
+            }
+
+            const canRestore = (log.action === 'delete' || log.action === 'edit') && (beforeSnap || afterSnap);
+            const restoreBtnHtml = canRestore ? `
+                <button type="button" onclick="restoreNoteFromLog('${log.id}')" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-2xl shadow-sm transition active:scale-95 interactive-btn">
+                    この付箋をボードに復元する
+                </button>
+            ` : '';
+
+            container.innerHTML = `
+                <div class="bg-white p-4 rounded-2xl border border-slate-200 flex items-center justify-between gap-2">
+                    <div>
+                        <p class="text-sm font-bold text-slate-800">${escapeHtml(actionSentence)}</p>
+                        <p class="text-[11px] text-slate-400 mt-0.5">${timeStr}</p>
+                    </div>
+                </div>
+                ${bodyDetailHtml}
+                ${restoreBtnHtml}
+            `;
+
+            showModal('history-detail-modal');
+        }
+
+        function closeHistoryDetailModal() {
+            closeModalById('history-detail-modal');
         }
 
         async function restoreNoteFromLog(logId) {
@@ -955,6 +1288,7 @@
             await saveNoteToDb(restoredNote);
             await recordAuditLog('restore', restoredNote, null);
 
+            closeHistoryDetailModal();
             closeHistoryModal();
             if (currentMainTab !== 'board') switchMainTab('board');
             renderNotes();
@@ -1046,24 +1380,26 @@
                 }
             });
 
-            if (window.currentUser && window.currentUser.uid) {
+            if (window.currentUser && window.currentUser.uid && !isUidForceLoggedOut(window.currentUser.uid)) {
                 const existing = userMap.get(window.currentUser.uid) || {};
                 userMap.set(window.currentUser.uid, {
                     ...existing,
                     ...window.currentUser,
                     isOnline: true,
+                    forceLogout: false,
                     lastActiveAt: new Date().toISOString()
                 });
             }
 
             const nowMs = Date.now();
             const allUsers = Array.from(userMap.values()).map(u => {
+                const forcedOut = Boolean(u.forceLogout || isUidForceLoggedOut(u.uid));
                 const lastActiveMs = u.lastActiveAt ? new Date(u.lastActiveAt).getTime() : 0;
                 const isRecentlyActive = (nowMs - lastActiveMs) < 90000;
-                const isSelf = window.currentUser && u.uid === window.currentUser.uid;
+                const isSelf = Boolean(window.currentUser && u.uid === window.currentUser.uid && !forcedOut);
                 return {
                     ...u,
-                    effectivelyOnline: Boolean(isSelf || (u.isOnline && isRecentlyActive))
+                    effectivelyOnline: Boolean(!forcedOut && (isSelf || (u.isOnline && isRecentlyActive)))
                 };
             });
 
@@ -1086,7 +1422,7 @@
                     </div>
                 `;
             } else {
-                onlinePanel.innerHTML = onlineUsers.map(u => createAccountCardHtml(u)).join('');
+                onlinePanel.innerHTML = onlineUsers.map(u => createAccountCardHtml(u, false)).join('');
             }
 
             if (allUsers.length === 0) {
@@ -1097,12 +1433,12 @@
                     </div>
                 `;
             } else {
-                loggedPanel.innerHTML = allUsers.map(u => createAccountCardHtml(u)).join('');
+                loggedPanel.innerHTML = allUsers.map(u => createAccountCardHtml(u, true)).join('');
             }
         }
 
-        function createAccountCardHtml(user) {
-            const isSelf = window.currentUser && user.uid === window.currentUser.uid;
+        function createAccountCardHtml(user, showTrashButton) {
+            const isSelf = Boolean(window.currentUser && user.uid === window.currentUser.uid && user.effectivelyOnline);
             const initial = (user.displayName || 'U')[0];
             const avatarHtml = user.photoURL
                 ? `<img src="${user.photoURL}" class="w-11 h-11 rounded-full object-cover border border-slate-200 shrink-0">`
@@ -1118,6 +1454,12 @@
 
             const emailLine = (window.isAdminMode && user.email)
                 ? `<p class="text-[11px] text-slate-400 truncate">${escapeHtml(user.email)}</p>`
+                : '';
+
+            const trashBtnHtml = (showTrashButton && window.isAdminMode && user.uid)
+                ? `<button type="button" onclick="event.stopPropagation(); kickAccountToReLogin('${escapeHtml(user.uid)}', '${escapeHtml(user.displayName || '名無しさん')}')" class="w-9 h-9 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 flex items-center justify-center transition active:scale-95 interactive-btn shrink-0" title="ログアウトさせる（再ログインが必要）">
+                        <i class="fa-solid fa-trash-can text-xs"></i>
+                   </button>`
                 : '';
 
             return `
@@ -1136,11 +1478,12 @@
                             <p class="text-[11px] text-slate-400 truncate">${timeLabel}</p>
                         </div>
                     </div>
-                    <div class="shrink-0">
+                    <div class="flex items-center space-x-2 shrink-0">
                         ${user.effectivelyOnline
                             ? '<span class="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">オンライン</span>'
                             : '<span class="text-[11px] font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">オフライン</span>'
                         }
+                        ${trashBtnHtml}
                     </div>
                 </div>
             `;
@@ -1150,11 +1493,13 @@
             const viewport = document.getElementById('viewport');
 
             viewport.addEventListener('pointerdown', (e) => {
+                if (window.isMonitorMode) return;
                 if (e.target.closest('.sticky-note') || e.target.closest('button') || e.target.closest('input') || e.target.closest('textarea') || e.target.closest('select')) return;
                 pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
             });
 
             viewport.addEventListener('pointermove', (e) => {
+                if (window.isMonitorMode) return;
                 if (!pointers.has(e.pointerId)) return;
                 const prev = pointers.get(e.pointerId);
                 const dx = e.clientX - prev.x;
@@ -1178,6 +1523,7 @@
             });
 
             viewport.addEventListener('touchstart', (e) => {
+                if (window.isMonitorMode) return;
                 if (e.touches.length === 2) {
                     initialPinchDistance = getHypot(
                         e.touches[0].clientX - e.touches[1].clientX,
@@ -1188,6 +1534,7 @@
             }, { passive: true });
 
             viewport.addEventListener('touchmove', (e) => {
+                if (window.isMonitorMode) return;
                 if (e.touches.length === 2 && initialPinchDistance) {
                     const currentDistance = getHypot(
                         e.touches[0].clientX - e.touches[1].clientX,
@@ -1235,7 +1582,7 @@
                 if (n.y + 200 > maxY) maxY = n.y + 200;
             });
 
-            const padding = 120;
+            const padding = window.isMonitorMode ? 60 : 120;
             minX -= padding;
             minY -= padding;
             maxX += padding;
@@ -1279,7 +1626,8 @@
             const viewport = document.getElementById('viewport');
 
             canvas.style.transform = `translate(${panX}px, ${panY}px) scale(${scale})`;
-            document.getElementById('zoom-level').innerText = Math.round(scale * 100) + '%';
+            const zoomLabel = document.getElementById('zoom-level');
+            if (zoomLabel) zoomLabel.innerText = Math.round(scale * 100) + '%';
 
             if (viewport) {
                 const baseSize = 40;
@@ -1339,7 +1687,11 @@
                 div.style.transform = `translate(${note.x}px, ${note.y}px)`;
                 div.style.minHeight = '180px';
 
-                if (window.isAdminMode) {
+                if (window.isMonitorMode && monitorSpotlightNoteId === note.id) {
+                    div.classList.add('ring-4', 'ring-indigo-600');
+                }
+
+                if (window.isAdminMode && !window.isMonitorMode) {
                     div.style.cursor = 'pointer';
                     div.onclick = (e) => {
                         if (e.target.closest('button')) return;
@@ -1352,7 +1704,7 @@
                 }
 
                 const isLoggedIn = Boolean(window.currentUser);
-                const isMyNote = (isLoggedIn && note.creatorId === window.myCreatorId) || window.isAdminMode;
+                const isMyNote = !window.isMonitorMode && ((isLoggedIn && note.creatorId === window.myCreatorId) || window.isAdminMode);
 
                 const actionButtonsHtml = isMyNote ? `
                     <div class="flex items-center space-x-1.5" onpointerdown="event.stopPropagation()">
@@ -1385,20 +1737,21 @@
                         <p class="text-xs sm:text-sm text-slate-700 whitespace-pre-wrap leading-relaxed">${escapeHtml(note.content)}</p>
                         <div class="mt-3 pt-2 border-t border-black/5 flex items-center justify-between text-[11px] text-slate-500 font-medium">
                             <span class="truncate max-w-[220px] flex items-center">${userAvatarHtml}${escapeHtml(displayAuthor)}</span>
-                            ${(isLoggedIn && note.creatorId === window.myCreatorId) ? '<span class="text-[9px] bg-indigo-600/10 text-indigo-700 px-1.5 py-0.5 rounded-md font-semibold">あなたの投稿</span>' : ''}
+                            ${(!window.isMonitorMode && isLoggedIn && note.creatorId === window.myCreatorId) ? '<span class="text-[9px] bg-indigo-600/10 text-indigo-700 px-1.5 py-0.5 rounded-md font-semibold">あなたの投稿</span>' : ''}
                         </div>
                     </div>
                 `;
                 canvas.appendChild(div);
             });
 
-            if (!hasInitializedView && window.notesData.length > 0) {
-                fitAllNotes(false);
+            if ((!hasInitializedView && window.notesData.length > 0) || (window.isMonitorMode && !monitorSpotlightNoteId)) {
+                fitAllNotes(window.isMonitorMode);
             }
             if (typeof renderAccountLists === 'function') renderAccountLists();
         }
 
         function openAdminDetailModalForNote(noteId) {
+            if (!window.isAdminMode || window.isMonitorMode) return;
             const note = window.notesData.find(n => n.id === noteId);
             if (!note) return;
 
@@ -1406,6 +1759,9 @@
 
             const createdAtStr = note.createdAt ? new Date(note.createdAt).toLocaleString('ja-JP') : '不明';
             const updatedAtStr = note.updatedAt ? new Date(note.updatedAt).toLocaleString('ja-JP') : '更新なし';
+            const noteTitleStr = note.title || '無題';
+            const noteAuthorStr = note.author || '未記入';
+            const noteUserNameStr = note.userName || note.author || '匿名';
 
             let historyHtml = '<p class="text-slate-400 text-xs italic">編集履歴はありません</p>';
             if (note.history && note.history.length > 0) {
@@ -1415,7 +1771,9 @@
                             <span class="font-bold text-indigo-600">履歴 #${idx + 1}</span>
                             <span>${new Date(h.timestamp).toLocaleString('ja-JP')}</span>
                         </div>
-                        <p class="text-xs text-slate-700 whitespace-pre-wrap">${escapeHtml(h.content)}</p>
+                        <p class="text-xs font-bold text-slate-800">タイトル: ${escapeHtml(h.title || noteTitleStr)}</p>
+                        <p class="text-[11px] text-slate-500">投稿者: ${escapeHtml(h.author || noteAuthorStr)}（${escapeHtml(h.userName || noteUserNameStr)}）</p>
+                        <p class="text-xs text-slate-700 whitespace-pre-wrap pt-1">${escapeHtml(h.content)}</p>
                     </div>
                 `).join('');
             }
@@ -1426,7 +1784,8 @@
                         ${note.userPhoto ? `<img src="${note.userPhoto}" class="w-12 h-12 rounded-full object-cover border border-slate-200 shadow-sm">` : `<div class="w-12 h-12 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-lg">U</div>`}
                         <div>
                             <p class="text-xs text-slate-400">投稿ユーザー</p>
-                            <p class="font-bold text-slate-800 text-sm">${escapeHtml(note.userName || note.author || '匿名')} <span class="text-[10px] text-slate-400 font-normal">(${escapeHtml(note.userEmail || 'ID: ' + note.creatorId)})</span></p>
+                            <p class="font-bold text-slate-800 text-sm">${escapeHtml(noteUserNameStr)} <span class="text-[10px] text-slate-400 font-normal">(${escapeHtml(note.userEmail || 'ID: ' + note.creatorId)})</span></p>
+                            <p class="text-[11px] text-slate-500 mt-0.5">記入名: ${escapeHtml(noteAuthorStr)}</p>
                         </div>
                     </div>
 
@@ -1443,11 +1802,13 @@
 
                     <div class="bg-white p-4 rounded-2xl border border-slate-200 space-y-2">
                         <p class="text-xs font-bold text-slate-700">現在の付箋内容</p>
+                        <p class="text-xs font-bold text-slate-800">タイトル: ${escapeHtml(noteTitleStr)}</p>
+                        <p class="text-xs text-slate-600">名前: ${escapeHtml(noteAuthorStr)}（${escapeHtml(noteUserNameStr)}）</p>
                         <p class="text-xs text-slate-700 bg-slate-50 p-3 rounded-xl border border-slate-100 whitespace-pre-wrap">${escapeHtml(note.content)}</p>
                     </div>
 
                     <div class="space-y-2">
-                        <p class="text-xs font-bold text-slate-700 px-1">編集前のコメント履歴</p>
+                        <p class="text-xs font-bold text-slate-700 px-1">編集前のコメント履歴（タイトル・名前・本文）</p>
                         <div class="space-y-2">
                             ${historyHtml}
                         </div>
@@ -1463,6 +1824,7 @@
         }
 
         function openLoginModal(fromPlusButton = false) {
+            if (window.isMonitorMode) return;
             const titleEl = document.getElementById('login-modal-title');
             const descEl = document.getElementById('login-modal-desc');
             if (titleEl && descEl) {
@@ -1489,6 +1851,7 @@
         }
 
         function handlePlusClick() {
+            if (window.isMonitorMode) return;
             if (!window.currentUser) {
                 openLoginModal(true);
                 return;
@@ -1497,6 +1860,7 @@
         }
 
         function openSearchModal() {
+            if (window.isMonitorMode) return;
             renderSearchList();
             showModal('search-modal');
             setTimeout(() => {
@@ -1602,6 +1966,7 @@
         }
 
         function startDragNote(e, id) {
+            if (window.isMonitorMode) return;
             e.stopPropagation();
             const note = window.notesData.find(n => n.id === id);
             if (!note) return;
@@ -1640,13 +2005,18 @@
                     targetNote.x = noteStartX + dx;
                     targetNote.y = noteStartY + dy;
                     const el = document.getElementById(`note-${id}`);
-                    if (el) el.style.transform = `translate(${targetNote.x}px, ${targetNote.y}px)`;
+                    if (el) {
+                        el.classList.add('no-anim');
+                        el.style.transform = `translate(${targetNote.x}px, ${targetNote.y}px)`;
+                    }
                 }
             };
 
             const upHandler = () => {
                 if (isDraggingNote && activeNoteId === id) {
                     isDraggingNote = false;
+                    const el = document.getElementById(`note-${id}`);
+                    if (el) el.classList.remove('no-anim');
                     if (didDragMove) {
                         const targetNote = window.notesData.find(n => n.id === id);
                         if (targetNote) saveNoteToDb(targetNote);
@@ -1663,6 +2033,7 @@
         }
 
         function openCreateModal() {
+            if (window.isMonitorMode) return;
             if (!window.currentUser) {
                 openLoginModal(true);
                 return;
@@ -1679,6 +2050,7 @@
         }
 
         function openEditModal(id) {
+            if (window.isMonitorMode) return;
             if (!window.currentUser && !window.isAdminMode) return;
             const note = window.notesData.find(n => n.id === id);
             if (!note || (note.creatorId !== window.myCreatorId && !window.isAdminMode)) return;
@@ -1701,6 +2073,7 @@
         }
 
         async function confirmDelete(id) {
+            if (window.isMonitorMode) return;
             if (!window.currentUser && !window.isAdminMode) return;
             const note = window.notesData.find(n => n.id === id);
             if (!note || (note.creatorId !== window.myCreatorId && !window.isAdminMode)) return;
@@ -1713,6 +2086,7 @@
         }
 
         function showModal(modalId) {
+            if (window.isMonitorMode) return;
             const modal = document.getElementById(modalId);
             if (!modal) return;
             modal.classList.remove('hidden');
@@ -1740,6 +2114,7 @@
 
         async function handleFormSubmit(e) {
             e.preventDefault();
+            if (window.isMonitorMode) return;
             if (!window.currentUser && !window.isAdminMode) {
                 openLoginModal(true);
                 return;
@@ -1783,9 +2158,12 @@
                         title = name + 'の挑戦';
                     }
 
-                    if (existingNote.content !== content) {
+                    if (existingNote.content !== content || existingNote.title !== title || existingNote.author !== author) {
                         if (!existingNote.history) existingNote.history = [];
                         existingNote.history.push({
+                            title: existingNote.title || '',
+                            author: existingNote.author || '',
+                            userName: existingNote.userName || existingNote.author || '匿名',
                             content: existingNote.content,
                             timestamp: existingNote.updatedAt || existingNote.createdAt || now
                         });
