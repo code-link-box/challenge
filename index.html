@@ -58,8 +58,52 @@
 
         window.notesData = JSON.parse(localStorage.getItem('freeboard_local_notes') || '[]');
         window.auditLogsData = JSON.parse(localStorage.getItem('freeboard_local_logs') || '[]');
+        window.loggedInUsersData = JSON.parse(localStorage.getItem('freeboard_logged_in_users') || '[]');
         window.onlineUsersData = [];
         window.currentUser = null;
+
+        function upsertLocalLoggedInUser(userObj) {
+            if (!userObj || (!userObj.uid && !userObj.email)) return;
+            const key = userObj.uid || userObj.email;
+            const map = new Map();
+            (window.loggedInUsersData || []).forEach(u => {
+                const k = u.uid || u.email;
+                if (k) map.set(k, u);
+            });
+            const prev = map.get(key) || {};
+            map.set(key, {
+                uid: userObj.uid || prev.uid || '',
+                displayName: userObj.displayName || prev.displayName || '名無しさん',
+                email: userObj.email || prev.email || '',
+                firstLoginAt: prev.firstLoginAt || userObj.firstLoginAt || new Date().toISOString(),
+                lastLoginAt: userObj.lastLoginAt || new Date().toISOString()
+            });
+            window.loggedInUsersData = Array.from(map.values());
+            localStorage.setItem('freeboard_logged_in_users', JSON.stringify(window.loggedInUsersData));
+        }
+
+        async function recordLoggedInUser(userObj) {
+            if (!userObj || (!userObj.uid && !userObj.email)) return;
+            upsertLocalLoggedInUser(userObj);
+            if (typeof renderAccountView === 'function') renderAccountView();
+
+            if (isFirebaseConnected && db) {
+                const docId = userObj.uid || encodeURIComponent(userObj.email);
+                const existing = (window.loggedInUsersData || []).find(u => (u.uid || u.email) === (userObj.uid || userObj.email));
+                const payload = {
+                    uid: userObj.uid || '',
+                    displayName: userObj.displayName || '名無しさん',
+                    email: userObj.email || '',
+                    firstLoginAt: (existing && existing.firstLoginAt) || userObj.firstLoginAt || new Date().toISOString(),
+                    lastLoginAt: userObj.lastLoginAt || new Date().toISOString()
+                };
+                try {
+                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'logged_in_users', docId), payload, { merge: true });
+                } catch (e) {
+                    console.warn("Logged-in user sync warning:", e);
+                }
+            }
+        }
 
         window.switchTab = function(tabName) {
             if (window.isMonitorMode) return;
@@ -197,6 +241,13 @@
             }
         });
 
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible' && window.currentUser) {
+                heartbeatPresence();
+            }
+            if (typeof renderAccountView === 'function') renderAccountView();
+        });
+
         function detectAndHighlightMonitorChanges(notes) {
             const nextMap = new Map();
             const changedOrNewIds = [];
@@ -305,10 +356,40 @@
                 isFirebaseConnected = true;
                 updateConnectionIndicator(true);
                 if (window.currentUser) {
+                    await recordLoggedInUser(window.currentUser);
                     startPresenceSync();
                 }
 
-                // オンラインアカウント（在席）のリアルタイム同期
+                // 一度でもGoogleログインしたアカウント一覧のリアルタイム同期
+                const loggedInColRef = collection(db, 'artifacts', appId, 'public', 'data', 'logged_in_users');
+                onSnapshot(loggedInColRef, (snapshot) => {
+                    const mergedMap = new Map();
+                    const localUsers = JSON.parse(localStorage.getItem('freeboard_logged_in_users') || '[]');
+                    localUsers.forEach(u => {
+                        const k = u.uid || u.email;
+                        if (k) mergedMap.set(k, u);
+                    });
+                    snapshot.forEach(docSnap => {
+                        const d = { id: docSnap.id, ...docSnap.data() };
+                        const k = d.uid || d.email || d.id;
+                        if (k) {
+                            const prev = mergedMap.get(k) || {};
+                            mergedMap.set(k, {
+                                ...prev,
+                                ...d,
+                                firstLoginAt: prev.firstLoginAt || d.firstLoginAt || d.lastLoginAt || '',
+                                lastLoginAt: d.lastLoginAt || prev.lastLoginAt || ''
+                            });
+                        }
+                    });
+                    window.loggedInUsersData = Array.from(mergedMap.values());
+                    localStorage.setItem('freeboard_logged_in_users', JSON.stringify(window.loggedInUsersData));
+                    if (typeof renderAccountView === 'function') renderAccountView();
+                }, (error) => {
+                    console.warn("Logged-in users sync warning:", error);
+                });
+
+                // いまログインしていて、いま見ているアカウント（在席）のリアルタイム同期
                 const presenceColRef = collection(db, 'artifacts', appId, 'public', 'data', 'presence');
                 onSnapshot(presenceColRef, (snapshot) => {
                     const users = [];
@@ -413,6 +494,7 @@
             };
             window.myCreatorId = user.uid;
 
+            await recordLoggedInUser(window.currentUser);
             updateUserIconUI();
             closeLoginModal();
             window.applyModeUI();
@@ -471,6 +553,8 @@
             window.notesData = saved ? JSON.parse(saved) : [];
             const savedLogs = localStorage.getItem('freeboard_local_logs');
             window.auditLogsData = savedLogs ? JSON.parse(savedLogs) : [];
+            const savedUsers = localStorage.getItem('freeboard_logged_in_users');
+            window.loggedInUsersData = savedUsers ? JSON.parse(savedUsers) : [];
 
             window.applyModeUI();
             if (!window.currentUser && !window.isMonitorMode) {
@@ -541,72 +625,98 @@
         }
 
         window.renderAccountView = function() {
-            const currentBox = document.getElementById('logged-in-account-card');
+            const loginListEl = document.getElementById('logged-in-accounts-list');
+            const loginCountEl = document.getElementById('logged-in-accounts-count');
             const onlineListEl = document.getElementById('online-accounts-list');
             const onlineCountEl = document.getElementById('online-accounts-count');
-            if (!currentBox || !onlineListEl) return;
+            if (!loginListEl || !onlineListEl) return;
 
-            // 1. ログインしたアカウント
-            if (window.currentUser) {
-                currentBox.innerHTML = `
-                    <div class="flex items-center justify-between gap-3">
-                        <div class="min-w-0">
-                            <div class="flex items-center space-x-2">
-                                <p class="font-bold text-slate-800 text-sm truncate">${escapeHtml(window.currentUser.displayName || '名無しさん')}</p>
-                                <span class="text-[10px] font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full shrink-0">ログイン中</span>
-                            </div>
-                            <p class="text-xs text-slate-500 truncate mt-1">${escapeHtml(window.currentUser.email || 'メールアドレス未設定')}</p>
-                        </div>
-                        <button type="button" onclick="logoutUser()" class="px-3.5 py-2 rounded-xl text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 transition shrink-0 interactive-btn">
-                            ログアウト
-                        </button>
+            const selfKey = window.currentUser ? (window.currentUser.uid || window.currentUser.email || 'self') : '';
+
+            // 1. 一度でもGoogleアカウントでログインした人一覧
+            const loginMap = new Map();
+            (window.loggedInUsersData || []).forEach(u => {
+                const k = u.uid || u.email || u.id;
+                if (!k) return;
+                loginMap.set(k, u);
+            });
+            if (window.currentUser && selfKey) {
+                const prev = loginMap.get(selfKey) || {};
+                loginMap.set(selfKey, {
+                    ...prev,
+                    uid: window.currentUser.uid,
+                    displayName: window.currentUser.displayName || prev.displayName || '名無しさん',
+                    email: window.currentUser.email || prev.email || '',
+                    lastLoginAt: window.currentUser.lastLoginAt || prev.lastLoginAt || new Date().toISOString()
+                });
+            }
+
+            const loggedInList = Array.from(loginMap.values()).map(u => {
+                const uKey = u.uid || u.email || u.id;
+                return { ...u, isSelf: Boolean(selfKey && uKey === selfKey) };
+            });
+
+            loggedInList.sort((a, b) => {
+                if (a.isSelf && !b.isSelf) return -1;
+                if (!a.isSelf && b.isSelf) return 1;
+                return new Date(b.lastLoginAt || 0).getTime() - new Date(a.lastLoginAt || 0).getTime();
+            });
+
+            if (loginCountEl) {
+                loginCountEl.innerText = `${loggedInList.length} 人`;
+            }
+
+            if (loggedInList.length === 0) {
+                loginListEl.innerHTML = `
+                    <div class="py-8 text-center text-slate-400">
+                        <p class="text-xs">まだログインしたアカウントはありません</p>
                     </div>
                 `;
             } else {
-                currentBox.innerHTML = `
-                    <div class="flex items-center justify-between gap-3">
-                        <div>
-                            <p class="font-bold text-slate-700 text-sm">未ログイン</p>
-                            <p class="text-xs text-slate-400 mt-0.5">Googleアカウントでログインすると表示されます</p>
+                loginListEl.innerHTML = loggedInList.map(u => `
+                    <div class="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3">
+                        <div class="min-w-0">
+                            <div class="flex items-center space-x-1.5">
+                                <p class="text-xs sm:text-sm font-bold text-slate-800 truncate">${escapeHtml(u.displayName || '名無しさん')}</p>
+                                ${u.isSelf ? '<span class="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full shrink-0">あなた</span>' : ''}
+                            </div>
+                            <p class="text-[11px] text-slate-400 truncate mt-0.5">${escapeHtml(u.email || '')}</p>
                         </div>
-                        <button type="button" onclick="openLoginModal(true)" class="px-3.5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition shrink-0 interactive-btn">
-                            ログイン
-                        </button>
+                        <span class="text-[11px] font-medium text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-xl shrink-0">
+                            ログイン済
+                        </span>
                     </div>
-                `;
+                `).join('');
             }
 
-            // 2. オンラインのアカウント（直近2分以内にハートビート更新されたユーザー＋自分）
+            // 2. いまログインしていて、いまこのボードを見ている人
             const nowMs = Date.now();
-            const activeThresholdMs = 2 * 60 * 1000;
-            const mapByKey = new Map();
+            const activeThresholdMs = 90 * 1000;
+            const onlineMap = new Map();
 
             (window.onlineUsersData || []).forEach(u => {
                 const key = u.uid || u.id || u.email;
                 if (!key) return;
                 const seenMs = u.lastSeenAt ? new Date(u.lastSeenAt).getTime() : 0;
-                if (nowMs - seenMs <= activeThresholdMs) {
-                    mapByKey.set(key, u);
+                if (seenMs > 0 && (nowMs - seenMs) <= activeThresholdMs) {
+                    onlineMap.set(key, u);
                 }
             });
 
-            if (window.currentUser) {
-                const selfKey = window.currentUser.uid || window.currentUser.email || 'self';
-                const prevSelf = mapByKey.get(selfKey) || {};
-                mapByKey.set(selfKey, {
+            if (window.currentUser && selfKey && document.visibilityState !== 'hidden') {
+                const prevSelf = onlineMap.get(selfKey) || {};
+                onlineMap.set(selfKey, {
                     ...prevSelf,
                     uid: window.currentUser.uid,
-                    displayName: window.currentUser.displayName,
-                    email: window.currentUser.email,
-                    lastSeenAt: prevSelf.lastSeenAt || new Date().toISOString(),
-                    isSelf: true
+                    displayName: window.currentUser.displayName || '名無しさん',
+                    email: window.currentUser.email || '',
+                    lastSeenAt: prevSelf.lastSeenAt || new Date().toISOString()
                 });
             }
 
-            const onlineList = Array.from(mapByKey.values()).map(u => {
-                const selfKey = window.currentUser ? (window.currentUser.uid || window.currentUser.email || 'self') : '';
+            const onlineList = Array.from(onlineMap.values()).map(u => {
                 const uKey = u.uid || u.id || u.email;
-                return { ...u, isSelf: Boolean(u.isSelf || (selfKey && uKey === selfKey)) };
+                return { ...u, isSelf: Boolean(selfKey && uKey === selfKey) };
             });
 
             onlineList.sort((a, b) => {
@@ -622,28 +732,26 @@
             if (onlineList.length === 0) {
                 onlineListEl.innerHTML = `
                     <div class="py-8 text-center text-slate-400">
-                        <p class="text-xs">現在オンラインのアカウントはありません</p>
+                        <p class="text-xs">いま見ているログイン中のアカウントはありません</p>
                     </div>
                 `;
                 return;
             }
 
-            onlineListEl.innerHTML = onlineList.map(u => {
-                return `
-                    <div class="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3">
-                        <div class="min-w-0">
-                            <div class="flex items-center space-x-1.5">
-                                <p class="text-xs sm:text-sm font-bold text-slate-800 truncate">${escapeHtml(u.displayName || '名無しさん')}</p>
-                                ${u.isSelf ? '<span class="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full shrink-0">あなた</span>' : ''}
-                            </div>
-                            <p class="text-[11px] text-slate-400 truncate mt-0.5">${escapeHtml(u.email || '')}</p>
+            onlineListEl.innerHTML = onlineList.map(u => `
+                <div class="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3">
+                    <div class="min-w-0">
+                        <div class="flex items-center space-x-1.5">
+                            <p class="text-xs sm:text-sm font-bold text-slate-800 truncate">${escapeHtml(u.displayName || '名無しさん')}</p>
+                            ${u.isSelf ? '<span class="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full shrink-0">あなた</span>' : ''}
                         </div>
-                        <span class="text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl shrink-0">
-                            オンライン
-                        </span>
+                        <p class="text-[11px] text-slate-400 truncate mt-0.5">${escapeHtml(u.email || '')}</p>
                     </div>
-                `;
-            }).join('');
+                    <span class="text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl shrink-0">
+                        閲覧中
+                    </span>
+                </div>
+            `).join('');
         };
 
         window.toggleUserMenu = function() {
@@ -818,13 +926,16 @@
                 </button>
             </div>
 
-            <!-- ログインパネル -->
+            <!-- ログインパネル（一度でもGoogleログインした人一覧） -->
             <div id="account-panel-login" class="bg-white rounded-3xl shadow-md border border-slate-200 p-5 space-y-3">
-                <h2 class="font-bold text-slate-800 text-sm sm:text-base">ログインしたアカウント</h2>
-                <div id="logged-in-account-card" class="pt-1"></div>
+                <div class="flex items-center justify-between">
+                    <h2 class="font-bold text-slate-800 text-sm sm:text-base">ログインしたアカウント</h2>
+                    <span id="logged-in-accounts-count" class="text-xs font-bold text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-full">0 人</span>
+                </div>
+                <div id="logged-in-accounts-list" class="space-y-2 pt-1"></div>
             </div>
 
-            <!-- オンラインパネル -->
+            <!-- オンラインパネル（いまログインしていて、いま見ている人） -->
             <div id="account-panel-online" class="hidden bg-white rounded-3xl shadow-md border border-slate-200 p-5 space-y-3">
                 <div class="flex items-center justify-between">
                     <h2 class="font-bold text-slate-800 text-sm sm:text-base">オンラインのアカウント</h2>
