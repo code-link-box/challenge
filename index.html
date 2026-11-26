@@ -53,10 +53,43 @@
         window.isAdminMode = initialMode.isAdmin;
         window.isMonitorMode = initialMode.isMonitor;
         window.isMonitorAuto = initialMode.isMonitorAuto;
+        window.activeTab = 'board';
 
         window.notesData = JSON.parse(localStorage.getItem('freeboard_local_notes') || '[]');
         window.auditLogsData = JSON.parse(localStorage.getItem('freeboard_local_logs') || '[]');
+        window.onlineUsersData = [];
         window.currentUser = null;
+
+        window.switchTab = function(tabName) {
+            if (window.isMonitorMode) return;
+            window.activeTab = (tabName === 'account') ? 'account' : 'board';
+
+            const boardView = document.getElementById('board-view');
+            const accountView = document.getElementById('account-view');
+            const boardControls = document.getElementById('board-top-controls');
+            const tabBoard = document.getElementById('tab-btn-board');
+            const tabAccount = document.getElementById('tab-btn-account');
+
+            if (window.activeTab === 'account') {
+                if (boardView) boardView.classList.add('hidden');
+                if (accountView) accountView.classList.remove('hidden');
+                if (boardControls) boardControls.classList.add('hidden');
+
+                if (tabBoard) tabBoard.className = 'flex-1 py-2.5 rounded-2xl text-xs font-bold text-slate-500 hover:text-slate-800 flex items-center justify-center space-x-2 transition interactive-btn';
+                if (tabAccount) tabAccount.className = 'flex-1 py-2.5 rounded-2xl text-xs font-bold bg-indigo-600 text-white shadow-sm flex items-center justify-center space-x-2 transition interactive-btn';
+
+                renderAccountView();
+            } else {
+                if (accountView) accountView.classList.add('hidden');
+                if (boardView) boardView.classList.remove('hidden');
+                if (boardControls) boardControls.classList.remove('hidden');
+
+                if (tabBoard) tabBoard.className = 'flex-1 py-2.5 rounded-2xl text-xs font-bold bg-indigo-600 text-white shadow-sm flex items-center justify-center space-x-2 transition interactive-btn';
+                if (tabAccount) tabAccount.className = 'flex-1 py-2.5 rounded-2xl text-xs font-bold text-slate-500 hover:text-slate-800 flex items-center justify-center space-x-2 transition interactive-btn';
+
+                updateTransform();
+            }
+        };
 
         window.applyModeUI = function() {
             const mode = parseModeFromHash();
@@ -68,6 +101,8 @@
             const subTitleEl = document.getElementById('header-subtitle');
             const historyBtn = document.getElementById('admin-history-btn');
             const plusFab = document.getElementById('plus-button-container');
+            const bottomNav = document.getElementById('bottom-tab-bar');
+            const boardControls = document.getElementById('board-top-controls');
             const loginModal = document.getElementById('login-modal');
             const searchModal = document.getElementById('search-modal');
             const noteModal = document.getElementById('note-modal');
@@ -75,8 +110,10 @@
             const adminDetailModal = document.getElementById('admin-detail-modal');
 
             if (window.isMonitorMode) {
+                window.activeTab = 'board';
                 if (headerEl) headerEl.classList.add('hidden');
                 if (plusFab) plusFab.classList.add('hidden');
+                if (bottomNav) bottomNav.classList.add('hidden');
                 if (loginModal) loginModal.classList.add('hidden');
                 if (searchModal) searchModal.classList.add('hidden');
                 if (noteModal) noteModal.classList.add('hidden');
@@ -84,7 +121,9 @@
                 if (adminDetailModal) adminDetailModal.classList.add('hidden');
 
                 const boardView = document.getElementById('board-view');
+                const accountView = document.getElementById('account-view');
                 if (boardView) boardView.classList.remove('hidden');
+                if (accountView) accountView.classList.add('hidden');
 
                 if (typeof startMonitorAutoCycle === 'function') startMonitorAutoCycle();
                 if (typeof fitAllNotes === 'function') fitAllNotes(true);
@@ -93,6 +132,11 @@
                 if (typeof clearMonitorFocus === 'function') clearMonitorFocus();
                 if (headerEl) headerEl.classList.remove('hidden');
                 if (plusFab) plusFab.classList.remove('hidden');
+                if (bottomNav) bottomNav.classList.remove('hidden');
+                if (boardControls) {
+                    if (window.activeTab === 'account') boardControls.classList.add('hidden');
+                    else boardControls.classList.remove('hidden');
+                }
 
                 if (window.isAdminMode) {
                     if (subTitleEl) {
@@ -115,6 +159,7 @@
                 }
             }
             updateUserIconUI();
+            if (typeof renderAccountView === 'function') renderAccountView();
         };
 
         window.addEventListener('hashchange', () => {
@@ -161,6 +206,48 @@
             }
         }
 
+        async function heartbeatPresence() {
+            if (!isFirebaseConnected || !db || !window.currentUser) return;
+            try {
+                const payload = {
+                    uid: window.currentUser.uid,
+                    displayName: window.currentUser.displayName || '名無しさん',
+                    email: window.currentUser.email || '',
+                    photoURL: window.currentUser.photoURL || '',
+                    lastSeenAt: new Date().toISOString()
+                };
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'presence', window.currentUser.uid), payload, { merge: true });
+            } catch (e) {
+                console.warn("Presence heartbeat warning:", e);
+            }
+        }
+
+        function startPresenceSync() {
+            if (presenceInterval) {
+                clearInterval(presenceInterval);
+                presenceInterval = null;
+            }
+            heartbeatPresence();
+            presenceInterval = setInterval(() => {
+                heartbeatPresence();
+                if (typeof renderAccountView === 'function') renderAccountView();
+            }, 25000);
+        }
+
+        async function clearPresence() {
+            if (presenceInterval) {
+                clearInterval(presenceInterval);
+                presenceInterval = null;
+            }
+            if (isFirebaseConnected && db && window.currentUser && window.currentUser.uid) {
+                try {
+                    await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'presence', window.currentUser.uid));
+                } catch (e) {
+                    console.warn("Presence delete warning:", e);
+                }
+            }
+        }
+
         window.initFirebase = async function() {
             const btn = document.getElementById('google-login-btn');
             if (btn) {
@@ -196,6 +283,22 @@
 
                 isFirebaseConnected = true;
                 updateConnectionIndicator(true);
+                if (window.currentUser) {
+                    startPresenceSync();
+                }
+
+                // オンラインアカウント（在席）のリアルタイム同期
+                const presenceColRef = collection(db, 'artifacts', appId, 'public', 'data', 'presence');
+                onSnapshot(presenceColRef, (snapshot) => {
+                    const users = [];
+                    snapshot.forEach(docSnap => {
+                        users.push({ id: docSnap.id, ...docSnap.data() });
+                    });
+                    window.onlineUsersData = users;
+                    if (typeof renderAccountView === 'function') renderAccountView();
+                }, (error) => {
+                    console.warn("Presence sync warning:", error);
+                });
 
                 // 付箋データのリアルタイム同期
                 const notesColRef = collection(db, 'artifacts', appId, 'public', 'data', 'notes');
@@ -215,7 +318,7 @@
                     fallbackToLocal();
                 });
 
-                // すべての変更・作成・削除履歴のリアルタイム同期（ローカル履歴とも統合して欠損を防止）
+                // すべての変更・作成・削除履歴のリアルタイム同期
                 const logsColRef = collection(db, 'artifacts', appId, 'public', 'data', 'audit_logs');
                 onSnapshot(logsColRef, (snapshot) => {
                     const mergedMap = new Map();
@@ -251,7 +354,7 @@
 
             const logEntry = {
                 id: 'log_' + Date.now() + '_' + Math.random().toString(36).substring(2, 6),
-                action: actionType, // 'create' | 'edit' | 'delete' | 'restore'
+                action: actionType,
                 noteId: noteObj ? noteObj.id : '',
                 actorName: actorName,
                 actorEmail: actorEmail,
@@ -292,6 +395,7 @@
             updateUserIconUI();
             closeLoginModal();
             window.applyModeUI();
+            startPresenceSync();
         }
 
         function resetLoginButtonUI() {
@@ -326,7 +430,7 @@
         window.logoutUser = async function() {
             if (confirm("ログアウトしますか？")) {
                 try {
-                    if (presenceInterval) clearInterval(presenceInterval);
+                    await clearPresence();
                     await signOut(auth);
                     window.currentUser = null;
                     updateUserIconUI();
@@ -355,6 +459,7 @@
             if (typeof renderNotes === 'function') renderNotes();
             if (typeof renderSearchList === 'function') renderSearchList();
             if (typeof renderHistoryList === 'function') renderHistoryList();
+            if (typeof renderAccountView === 'function') renderAccountView();
         }
 
         function updateConnectionIndicator(isConnected) {
@@ -392,6 +497,10 @@
                                 <p class="text-xs font-bold text-slate-800 truncate">${escapeHtml(window.currentUser.displayName || '名無しさん')}</p>
                                 <p class="text-[10px] text-slate-400 truncate">${escapeHtml(window.currentUser.email || '')}</p>
                             </div>
+                            <button type="button" onclick="switchTab('account')" class="w-full text-left px-4 py-2 text-xs text-slate-700 hover:bg-slate-50 font-medium flex items-center space-x-2">
+                                <i class="fa-solid fa-id-card text-indigo-600"></i>
+                                <span>アカウント画面</span>
+                            </button>
                             <button type="button" onclick="logoutUser()" class="w-full text-left px-4 py-2 text-xs text-rose-600 hover:bg-rose-50 font-medium flex items-center space-x-2">
                                 <i class="fa-solid fa-right-from-bracket"></i>
                                 <span>ログアウト</span>
@@ -413,6 +522,141 @@
                 container.innerHTML = '';
             }
         }
+
+        function renderAvatarBadge(userObj, sizeClass = 'w-11 h-11 text-base') {
+            if (userObj && userObj.photoURL) {
+                return `<img src="${escapeHtml(userObj.photoURL)}" class="${sizeClass} rounded-full object-cover border border-slate-200 shrink-0">`;
+            }
+            const initial = (userObj && (userObj.displayName || userObj.email)) ? (userObj.displayName || userObj.email)[0] : 'U';
+            return `<div class="${sizeClass} rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold shrink-0">${escapeHtml(initial)}</div>`;
+        }
+
+        window.renderAccountView = function() {
+            const currentBox = document.getElementById('logged-in-account-card');
+            const onlineListEl = document.getElementById('online-accounts-list');
+            const onlineCountEl = document.getElementById('online-accounts-count');
+            if (!currentBox || !onlineListEl) return;
+
+            // 1. ログインしたアカウント
+            if (window.currentUser) {
+                const loginTimeStr = window.currentUser.lastLoginAt
+                    ? new Date(window.currentUser.lastLoginAt).toLocaleString('ja-JP')
+                    : 'ログイン中';
+                currentBox.innerHTML = `
+                    <div class="flex items-center justify-between gap-3">
+                        <div class="flex items-center space-x-3.5 min-w-0">
+                            ${renderAvatarBadge(window.currentUser, 'w-12 h-12 text-lg')}
+                            <div class="min-w-0">
+                                <div class="flex items-center space-x-2">
+                                    <p class="font-bold text-slate-800 text-sm truncate">${escapeHtml(window.currentUser.displayName || '名無しさん')}</p>
+                                    <span class="text-[10px] font-bold bg-emerald-100 text-emerald-700 px-2 py-0.5 rounded-full shrink-0">ログイン中</span>
+                                </div>
+                                <p class="text-xs text-slate-500 truncate mt-0.5">${escapeHtml(window.currentUser.email || 'メールアドレス未設定')}</p>
+                                <p class="text-[11px] text-slate-400 mt-0.5">ログイン時刻: ${escapeHtml(loginTimeStr)}</p>
+                            </div>
+                        </div>
+                        <button type="button" onclick="logoutUser()" class="px-3.5 py-2 rounded-xl text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 transition shrink-0 interactive-btn">
+                            ログアウト
+                        </button>
+                    </div>
+                `;
+            } else {
+                currentBox.innerHTML = `
+                    <div class="flex items-center justify-between gap-3">
+                        <div class="flex items-center space-x-3">
+                            <div class="w-12 h-12 rounded-full bg-slate-100 text-slate-400 flex items-center justify-center text-lg shrink-0">
+                                <i class="fa-solid fa-user-slash"></i>
+                            </div>
+                            <div>
+                                <p class="font-bold text-slate-700 text-sm">未ログイン</p>
+                                <p class="text-xs text-slate-400 mt-0.5">Googleアカウントでログインすると表示されます</p>
+                            </div>
+                        </div>
+                        <button type="button" onclick="openLoginModal(true)" class="px-3.5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 transition shrink-0 interactive-btn">
+                            ログイン
+                        </button>
+                    </div>
+                `;
+            }
+
+            // 2. オンラインのアカウント（直近2分以内にハートビート更新されたユーザー＋自分）
+            const nowMs = Date.now();
+            const activeThresholdMs = 2 * 60 * 1000;
+            const mapByKey = new Map();
+
+            (window.onlineUsersData || []).forEach(u => {
+                const key = u.uid || u.id || u.email;
+                if (!key) return;
+                const seenMs = u.lastSeenAt ? new Date(u.lastSeenAt).getTime() : 0;
+                if (nowMs - seenMs <= activeThresholdMs) {
+                    mapByKey.set(key, u);
+                }
+            });
+
+            if (window.currentUser) {
+                const selfKey = window.currentUser.uid || window.currentUser.email || 'self';
+                const prevSelf = mapByKey.get(selfKey) || {};
+                mapByKey.set(selfKey, {
+                    ...prevSelf,
+                    uid: window.currentUser.uid,
+                    displayName: window.currentUser.displayName,
+                    email: window.currentUser.email,
+                    photoURL: window.currentUser.photoURL,
+                    lastSeenAt: prevSelf.lastSeenAt || new Date().toISOString(),
+                    isSelf: true
+                });
+            }
+
+            const onlineList = Array.from(mapByKey.values()).map(u => {
+                const selfKey = window.currentUser ? (window.currentUser.uid || window.currentUser.email || 'self') : '';
+                const uKey = u.uid || u.id || u.email;
+                return { ...u, isSelf: Boolean(u.isSelf || (selfKey && uKey === selfKey)) };
+            });
+
+            onlineList.sort((a, b) => {
+                if (a.isSelf && !b.isSelf) return -1;
+                if (!a.isSelf && b.isSelf) return 1;
+                return (a.displayName || '').localeCompare(b.displayName || '', 'ja');
+            });
+
+            if (onlineCountEl) {
+                onlineCountEl.innerText = `${onlineList.length} 人`;
+            }
+
+            if (onlineList.length === 0) {
+                onlineListEl.innerHTML = `
+                    <div class="py-8 text-center text-slate-400">
+                        <i class="fa-solid fa-users text-xl mb-2 block"></i>
+                        <p class="text-xs">現在オンラインのアカウントはありません</p>
+                    </div>
+                `;
+                return;
+            }
+
+            onlineListEl.innerHTML = onlineList.map(u => {
+                const seenLabel = u.lastSeenAt ? new Date(u.lastSeenAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }) : 'オンライン';
+                return `
+                    <div class="p-3.5 rounded-2xl bg-slate-50 border border-slate-200/80 flex items-center justify-between gap-3">
+                        <div class="flex items-center space-x-3 min-w-0">
+                            <div class="relative shrink-0">
+                                ${renderAvatarBadge(u, 'w-10 h-10 text-sm')}
+                                <span class="w-3 h-3 rounded-full bg-emerald-500 border-2 border-white absolute -bottom-0.5 -right-0.5"></span>
+                            </div>
+                            <div class="min-w-0">
+                                <div class="flex items-center space-x-1.5">
+                                    <p class="text-xs sm:text-sm font-bold text-slate-800 truncate">${escapeHtml(u.displayName || '名無しさん')}</p>
+                                    ${u.isSelf ? '<span class="text-[10px] font-bold bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full shrink-0">あなた</span>' : ''}
+                                </div>
+                                <p class="text-[11px] text-slate-400 truncate">${escapeHtml(u.email || '')}</p>
+                            </div>
+                        </div>
+                        <span class="text-[11px] font-medium text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-xl shrink-0">
+                            オンライン (${escapeHtml(seenLabel)})
+                        </span>
+                    </div>
+                `;
+            }).join('');
+        };
 
         window.toggleUserMenu = function() {
             const menu = document.getElementById('user-dropdown-menu');
@@ -466,6 +710,7 @@
             window.initFirebase();
             if (typeof initCanvas === 'function') initCanvas();
             if (typeof renderHistoryList === 'function') renderHistoryList();
+            if (typeof renderAccountView === 'function') renderAccountView();
         };
     </script>
     <style>
@@ -564,13 +809,55 @@
             <div id="canvas" class="absolute top-0 left-0 w-[5000px] h-[5000px] origin-top-left transition-transform duration-500 ease-out"></div>
         </div>
 
-        <!-- Plus Button (100%表示時のドット2個分=80px上に配置) -->
-        <div id="plus-button-container" class="fixed bottom-[124px] right-6 md:bottom-[128px] md:right-8 z-40">
+        <!-- Plus Button (下部タブバーの上・100%表示時のドット2個分=80px上に配置) -->
+        <div id="plus-button-container" class="fixed bottom-[148px] right-6 md:bottom-[152px] md:right-8 z-40">
             <button type="button" onclick="handlePlusClick()" class="w-16 h-16 bg-indigo-600 hover:bg-indigo-700 active:scale-90 text-white rounded-full shadow-xl flex items-center justify-center text-2xl transition transform interactive-btn" title="新しい挑戦を書き込む">
                 <i class="fa-solid fa-plus"></i>
             </button>
         </div>
     </div>
+
+    <!-- Account View -->
+    <div id="account-view" class="w-full h-full hidden pt-20 pb-24 px-4 overflow-y-auto scrollable-list">
+        <div class="max-w-xl mx-auto space-y-4">
+            <div class="bg-white rounded-3xl shadow-md border border-slate-200 p-5 space-y-3">
+                <div class="flex items-center space-x-2">
+                    <div class="w-7 h-7 rounded-xl bg-indigo-600 text-white flex items-center justify-center text-xs">
+                        <i class="fa-solid fa-user-check"></i>
+                    </div>
+                    <h2 class="font-bold text-slate-800 text-sm sm:text-base">ログインしたアカウント</h2>
+                </div>
+                <div id="logged-in-account-card" class="pt-1"></div>
+            </div>
+
+            <div class="bg-white rounded-3xl shadow-md border border-slate-200 p-5 space-y-3">
+                <div class="flex items-center justify-between">
+                    <div class="flex items-center space-x-2">
+                        <div class="w-7 h-7 rounded-xl bg-emerald-500 text-white flex items-center justify-center text-xs">
+                            <i class="fa-solid fa-signal"></i>
+                        </div>
+                        <h2 class="font-bold text-slate-800 text-sm sm:text-base">オンラインのアカウント</h2>
+                    </div>
+                    <span id="online-accounts-count" class="text-xs font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-full">0 人</span>
+                </div>
+                <div id="online-accounts-list" class="space-y-2 pt-1"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bottom Tab Bar: ボード / アカウント -->
+    <nav id="bottom-tab-bar" class="fixed bottom-3 left-3 right-3 z-30 flex justify-center pointer-events-none">
+        <div class="bg-white/95 backdrop-blur-md p-1.5 rounded-3xl shadow-lg border border-slate-200 flex items-center w-full max-w-xs pointer-events-auto">
+            <button id="tab-btn-board" type="button" onclick="switchTab('board')" class="flex-1 py-2.5 rounded-2xl text-xs font-bold bg-indigo-600 text-white shadow-sm flex items-center justify-center space-x-2 transition interactive-btn">
+                <i class="fa-solid fa-table-cells-large"></i>
+                <span>ボード</span>
+            </button>
+            <button id="tab-btn-account" type="button" onclick="switchTab('account')" class="flex-1 py-2.5 rounded-2xl text-xs font-bold text-slate-500 hover:text-slate-800 flex items-center justify-center space-x-2 transition interactive-btn">
+                <i class="fa-solid fa-users"></i>
+                <span>アカウント</span>
+            </button>
+        </div>
+    </nav>
 
     <!-- Login Modal -->
     <div id="login-modal" class="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center hidden opacity-0 transition-opacity duration-200 p-4">
@@ -847,7 +1134,6 @@
             renderSearchList();
         }
 
-        // モニターモード：特定付箋へズームアップし、指定ミリ秒後に全体表示へ戻る
         function clearMonitorFocus() {
             if (monitorReturnTimeout) {
                 clearTimeout(monitorReturnTimeout);
@@ -947,7 +1233,6 @@
             });
         }
 
-        // 変更履歴モーダル開閉・描画・詳細表示・復元（編集モード時のみ）
         function openHistoryModal() {
             if (!window.isAdminMode) return;
             renderHistoryList();
@@ -1250,7 +1535,7 @@
 
             scale = Math.max(0.2, Math.min(3.0, Math.min(scaleX, scaleY)));
 
-            panX = (vWidth / 2) - ((minX + maxX) / 2) * scale;
+            panX = (vWidth / 2) - ((minX + maxY) / 2) * scale;
             panY = (vHeight / 2) - ((minY + maxY) / 2) * scale;
 
             hasInitializedView = true;
@@ -1593,6 +1878,9 @@
             if (!note) return;
 
             closeSearchModal();
+            if (window.activeTab !== 'board') {
+                switchTab('board');
+            }
             const viewport = document.getElementById('viewport');
             if (!viewport) return;
 
