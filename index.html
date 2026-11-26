@@ -133,12 +133,21 @@
                     }
                 }
             }
+            updateUserIconUI();
         };
 
         window.addEventListener('hashchange', () => {
             window.applyModeUI();
             if (typeof renderNotes === 'function') renderNotes();
             if (typeof renderAccountLists === 'function') renderAccountLists();
+        });
+
+        document.addEventListener('click', (e) => {
+            const container = document.getElementById('user-icon-container');
+            const menu = document.getElementById('user-dropdown-menu');
+            if (menu && !menu.classList.contains('hidden') && container && !container.contains(e.target)) {
+                menu.classList.add('hidden');
+            }
         });
 
         function detectAndHighlightMonitorChanges(notes) {
@@ -409,11 +418,11 @@
             };
             window.myCreatorId = user.uid;
 
-            await syncUserPresence(window.currentUser, true, { forceLogout: false });
-            startPresenceHeartbeat();
             updateUserIconUI();
             closeLoginModal();
             window.applyModeUI();
+            await syncUserPresence(window.currentUser, true, { forceLogout: false });
+            startPresenceHeartbeat();
         }
 
         document.addEventListener('visibilitychange', () => {
@@ -556,29 +565,39 @@
 
             if (window.currentUser) {
                 container.classList.remove('hidden');
+                container.style.display = 'flex';
                 const avatar = window.currentUser.photoURL ?
                     `<img src="${window.currentUser.photoURL}" class="w-10 h-10 rounded-full object-cover border border-slate-200">` :
-                    `<div class="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm">${(window.currentUser.displayName || 'G')[0]}</div>`;
+                    `<div class="w-10 h-10 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm">${escapeHtml((window.currentUser.displayName || 'G')[0])}</div>`;
 
                 container.innerHTML = `
                     <div class="relative group">
-                        <button onclick="toggleUserMenu()" class="flex items-center space-x-2 focus:outline-none interactive-btn" title="${window.currentUser.displayName}">
+                        <button type="button" onclick="toggleUserMenu()" class="flex items-center space-x-2 focus:outline-none interactive-btn" title="${escapeHtml(window.currentUser.displayName || 'アカウント')}">
                             ${avatar}
                         </button>
                         <div id="user-dropdown-menu" class="absolute right-0 mt-2 w-48 bg-white rounded-2xl shadow-xl border border-slate-100 py-2 hidden z-50">
                             <div class="px-4 py-2 border-b border-slate-100">
-                                <p class="text-xs font-bold text-slate-800 truncate">${escapeHtml(window.currentUser.displayName)}</p>
+                                <p class="text-xs font-bold text-slate-800 truncate">${escapeHtml(window.currentUser.displayName || '名無しさん')}</p>
                                 <p class="text-[10px] text-slate-400 truncate">${escapeHtml(window.currentUser.email || '')}</p>
                             </div>
-                            <button onclick="logoutUser()" class="w-full text-left px-4 py-2 text-xs text-rose-600 hover:bg-rose-50 font-medium flex items-center space-x-2">
+                            <button type="button" onclick="logoutUser()" class="w-full text-left px-4 py-2 text-xs text-rose-600 hover:bg-rose-50 font-medium flex items-center space-x-2">
                                 <i class="fa-solid fa-right-from-bracket"></i>
                                 <span>ログアウト</span>
                             </button>
                         </div>
                     </div>
                 `;
+            } else if (!window.isMonitorMode) {
+                container.classList.remove('hidden');
+                container.style.display = 'flex';
+                container.innerHTML = `
+                    <button type="button" onclick="openLoginModal(true)" class="w-10 h-10 rounded-full bg-slate-100 hover:bg-indigo-50 text-slate-600 hover:text-indigo-600 flex items-center justify-center text-sm transition interactive-btn" title="ログイン">
+                        <i class="fa-solid fa-user"></i>
+                    </button>
+                `;
             } else {
                 container.classList.add('hidden');
+                container.style.display = 'none';
                 container.innerHTML = '';
             }
         }
@@ -722,7 +741,7 @@
             </div>
 
             <!-- User Icon / Logout Control -->
-            <div id="user-icon-container" class="bg-white/95 backdrop-blur-md p-1 rounded-2xl shadow-md border border-slate-200 flex items-center hidden">
+            <div id="user-icon-container" class="bg-white/95 backdrop-blur-md p-1 rounded-2xl shadow-md border border-slate-200 flex items-center">
                 <!-- Dynamic Loaded -->
             </div>
         </div>
@@ -1373,6 +1392,7 @@
                 tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-slate-600 hover:bg-slate-100 interactive-btn';
                 renderAccountLists();
             }
+            updateUserIconUI();
         }
 
         // アカウント画面のサブタブ切り替え（オンラインのアカウント / ログインしたアカウント）
@@ -2302,7 +2322,7 @@
 
         function escapeHtml(str) {
             if (!str) return '';
-            return str.replace(/&/g, '&amp;')
+            return String(str).replace(/&/g, '&amp;')
                     .replace(/</g, '&lt;')
                     .replace(/>/g, '&gt;')
                     .replace(/"/g, '&quot;')
