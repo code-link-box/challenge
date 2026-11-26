@@ -55,18 +55,8 @@
         window.isMonitorAuto = initialMode.isMonitorAuto;
 
         window.notesData = JSON.parse(localStorage.getItem('freeboard_local_notes') || '[]');
-        window.usersData = JSON.parse(localStorage.getItem('freeboard_cached_users') || '[]');
         window.auditLogsData = JSON.parse(localStorage.getItem('freeboard_local_logs') || '[]');
         window.currentUser = null;
-        window.loginSessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
-        window.forcedLogoutUids = new Set(JSON.parse(localStorage.getItem('freeboard_forced_logout_uids') || '[]'));
-
-        function isUidForceLoggedOut(uid) {
-            if (!uid) return false;
-            if (window.forcedLogoutUids && window.forcedLogoutUids.has(uid)) return true;
-            const userDoc = (window.usersData || []).find(u => u.uid === uid);
-            return Boolean(userDoc && userDoc.forceLogout);
-        }
 
         window.applyModeUI = function() {
             const mode = parseModeFromHash();
@@ -77,7 +67,6 @@
             const headerEl = document.getElementById('main-header');
             const subTitleEl = document.getElementById('header-subtitle');
             const historyBtn = document.getElementById('admin-history-btn');
-            const bottomNav = document.getElementById('bottom-mode-tabs');
             const plusFab = document.getElementById('plus-button-container');
             const loginModal = document.getElementById('login-modal');
             const searchModal = document.getElementById('search-modal');
@@ -87,7 +76,6 @@
 
             if (window.isMonitorMode) {
                 if (headerEl) headerEl.classList.add('hidden');
-                if (bottomNav) bottomNav.classList.add('hidden');
                 if (plusFab) plusFab.classList.add('hidden');
                 if (loginModal) loginModal.classList.add('hidden');
                 if (searchModal) searchModal.classList.add('hidden');
@@ -96,9 +84,7 @@
                 if (adminDetailModal) adminDetailModal.classList.add('hidden');
 
                 const boardView = document.getElementById('board-view');
-                const accountView = document.getElementById('account-view');
                 if (boardView) boardView.classList.remove('hidden');
-                if (accountView) accountView.classList.add('hidden');
 
                 if (typeof startMonitorAutoCycle === 'function') startMonitorAutoCycle();
                 if (typeof fitAllNotes === 'function') fitAllNotes(true);
@@ -117,7 +103,6 @@
                         historyBtn.classList.remove('hidden');
                         historyBtn.style.display = 'flex';
                     }
-                    if (bottomNav) bottomNav.classList.remove('hidden');
                 } else {
                     if (subTitleEl) {
                         subTitleEl.innerText = '';
@@ -127,10 +112,6 @@
                         historyBtn.classList.add('hidden');
                         historyBtn.style.display = 'none';
                     }
-                    if (bottomNav) bottomNav.classList.add('hidden');
-                    if (typeof switchMainTab === 'function' && typeof currentMainTab !== 'undefined' && currentMainTab !== 'board') {
-                        switchMainTab('board');
-                    }
                 }
             }
             updateUserIconUI();
@@ -139,7 +120,6 @@
         window.addEventListener('hashchange', () => {
             window.applyModeUI();
             if (typeof renderNotes === 'function') renderNotes();
-            if (typeof renderAccountLists === 'function') renderAccountLists();
         });
 
         document.addEventListener('click', (e) => {
@@ -212,7 +192,6 @@
                     }
                     window.applyModeUI();
                     if (typeof renderNotes === 'function') renderNotes();
-                    if (typeof renderAccountLists === 'function') renderAccountLists();
                 });
 
                 isFirebaseConnected = true;
@@ -231,45 +210,9 @@
                     detectAndHighlightMonitorChanges(notes);
                     if (typeof renderNotes === 'function') renderNotes();
                     if (typeof renderSearchList === 'function') renderSearchList();
-                    if (typeof renderAccountLists === 'function') renderAccountLists();
                 }, (error) => {
                     console.warn("Firestore sync warning, falling back to local:", error);
                     fallbackToLocal();
-                });
-
-                // ユーザー一覧・オンライン状態・強制ログアウト状態のリアルタイム同期
-                const usersColRef = collection(db, 'artifacts', appId, 'public', 'data', 'users');
-                onSnapshot(usersColRef, async (snapshot) => {
-                    const mergedUsersMap = new Map();
-                    (window.usersData || []).forEach(u => {
-                        if (u && u.uid) mergedUsersMap.set(u.uid, { ...u });
-                    });
-                    snapshot.forEach(docSnap => {
-                        const data = docSnap.data() || {};
-                        const uid = data.uid || docSnap.id;
-                        const prev = mergedUsersMap.get(uid) || {};
-                        mergedUsersMap.set(uid, {
-                            ...prev,
-                            ...data,
-                            uid: uid
-                        });
-                    });
-
-                    const users = Array.from(mergedUsersMap.values());
-                    window.usersData = users;
-                    localStorage.setItem('freeboard_cached_users', JSON.stringify(users));
-
-                    if (window.currentUser && window.currentUser.uid) {
-                        const me = users.find(u => u.uid === window.currentUser.uid);
-                        if (me && me.forceLogout) {
-                            await forceSignOutCurrentUser();
-                            return;
-                        }
-                    }
-
-                    if (typeof renderAccountLists === 'function') renderAccountLists();
-                }, (error) => {
-                    console.warn("Users sync warning:", error);
                 });
 
                 // すべての変更・作成・削除履歴のリアルタイム同期（ローカル履歴とも統合して欠損を防止）
@@ -335,79 +278,7 @@
             }
         };
 
-        async function syncUserPresence(user, isOnline, extraFields = {}) {
-            if (!user || !user.uid) return;
-            const now = new Date().toISOString();
-            const userPayload = {
-                uid: user.uid,
-                displayName: user.displayName || '名無しさん',
-                email: user.email || '',
-                photoURL: user.photoURL || '',
-                isOnline: isOnline,
-                forceLogout: false,
-                lastLoginAt: user.lastLoginAt || now,
-                lastActiveAt: now,
-                ...extraFields
-            };
-
-            const sessions = JSON.parse(localStorage.getItem('freeboard_login_sessions') || '[]');
-            const idx = sessions.findIndex(s => s.uid === user.uid);
-            if (idx >= 0) {
-                sessions[idx] = { ...sessions[idx], ...userPayload };
-            } else {
-                sessions.push(userPayload);
-            }
-            window.loginSessions = sessions;
-            localStorage.setItem('freeboard_login_sessions', JSON.stringify(sessions));
-
-            const uIdx = (window.usersData || []).findIndex(u => u.uid === user.uid);
-            if (uIdx >= 0) {
-                window.usersData[uIdx] = { ...window.usersData[uIdx], ...userPayload };
-            } else {
-                window.usersData = [...(window.usersData || []), userPayload];
-            }
-            localStorage.setItem('freeboard_cached_users', JSON.stringify(window.usersData));
-
-            if (isFirebaseConnected && db) {
-                try {
-                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', user.uid), userPayload, { merge: true });
-                } catch (e) {
-                    console.warn("Failed to sync user presence:", e);
-                }
-            }
-            if (typeof renderAccountLists === 'function') renderAccountLists();
-        }
-
-        function startPresenceHeartbeat() {
-            if (presenceInterval) clearInterval(presenceInterval);
-            presenceInterval = setInterval(() => {
-                if (window.currentUser && document.visibilityState === 'visible') {
-                    syncUserPresence(window.currentUser, true);
-                }
-            }, 30000);
-        }
-
-        async function forceSignOutCurrentUser() {
-            if (presenceInterval) clearInterval(presenceInterval);
-            try {
-                if (auth) await signOut(auth);
-            } catch (e) {
-                console.warn("Sign out error:", e);
-            }
-            window.currentUser = null;
-            updateUserIconUI();
-            window.applyModeUI();
-            if (!window.isMonitorMode) {
-                openLoginModal();
-            }
-            if (typeof renderAccountLists === 'function') renderAccountLists();
-        }
-
         async function handleSuccessfulUser(user) {
-            if (isUidForceLoggedOut(user.uid)) {
-                await forceSignOutCurrentUser();
-                return;
-            }
             const now = new Date().toISOString();
             window.currentUser = {
                 uid: user.uid,
@@ -421,20 +292,7 @@
             updateUserIconUI();
             closeLoginModal();
             window.applyModeUI();
-            await syncUserPresence(window.currentUser, true, { forceLogout: false });
-            startPresenceHeartbeat();
         }
-
-        document.addEventListener('visibilitychange', () => {
-            if (window.currentUser) {
-                syncUserPresence(window.currentUser, document.visibilityState === 'visible');
-            }
-        });
-        window.addEventListener('beforeunload', () => {
-            if (window.currentUser) {
-                syncUserPresence(window.currentUser, false);
-            }
-        });
 
         function resetLoginButtonUI() {
             const btn = document.getElementById('google-login-btn');
@@ -469,9 +327,6 @@
             if (confirm("ログアウトしますか？")) {
                 try {
                     if (presenceInterval) clearInterval(presenceInterval);
-                    if (window.currentUser) {
-                        await syncUserPresence(window.currentUser, false, { forceLogout: false });
-                    }
                     await signOut(auth);
                     window.currentUser = null;
                     updateUserIconUI();
@@ -482,48 +337,6 @@
                     console.error("Logout failed:", e);
                 }
             }
-        };
-
-        // アカウント一覧のゴミ箱ボタンから対象アカウントをログアウトさせる（再ログイン必須化）
-        window.kickAccountToReLogin = async function(targetUid, targetName) {
-            if (!window.isAdminMode || !targetUid) return;
-            const label = targetName ? `${targetName} さん` : 'このアカウント';
-            if (!confirm(`${label} をログアウトさせますか？再度ログインが必要になります。`)) return;
-
-            window.forcedLogoutUids.add(targetUid);
-            localStorage.setItem('freeboard_forced_logout_uids', JSON.stringify(Array.from(window.forcedLogoutUids)));
-
-            const sessions = (window.loginSessions || []).map(s =>
-                s.uid === targetUid ? { ...s, isOnline: false, forceLogout: true } : s
-            );
-            window.loginSessions = sessions;
-            localStorage.setItem('freeboard_login_sessions', JSON.stringify(sessions));
-
-            window.usersData = (window.usersData || []).map(u =>
-                u.uid === targetUid ? { ...u, isOnline: false, forceLogout: true } : u
-            );
-            localStorage.setItem('freeboard_cached_users', JSON.stringify(window.usersData));
-
-            if (isFirebaseConnected && db) {
-                try {
-                    await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'users', targetUid), {
-                        uid: targetUid,
-                        displayName: targetName || '名無しさん',
-                        isOnline: false,
-                        forceLogout: true,
-                        forcedLogoutAt: new Date().toISOString()
-                    }, { merge: true });
-                } catch (e) {
-                    console.warn("Failed to update forceLogout in Firestore:", e);
-                }
-            }
-
-            if (window.currentUser && window.currentUser.uid === targetUid) {
-                await forceSignOutCurrentUser();
-                return;
-            }
-
-            if (typeof renderAccountLists === 'function') renderAccountLists();
         };
 
         function fallbackToLocal() {
@@ -541,7 +354,6 @@
 
             if (typeof renderNotes === 'function') renderNotes();
             if (typeof renderSearchList === 'function') renderSearchList();
-            if (typeof renderAccountLists === 'function') renderAccountLists();
             if (typeof renderHistoryList === 'function') renderHistoryList();
         }
 
@@ -653,7 +465,6 @@
             window.applyModeUI();
             window.initFirebase();
             if (typeof initCanvas === 'function') initCanvas();
-            if (typeof renderAccountLists === 'function') renderAccountLists();
             if (typeof renderHistoryList === 'function') renderHistoryList();
         };
     </script>
@@ -757,41 +568,6 @@
         <div id="plus-button-container" class="fixed bottom-[124px] right-6 md:bottom-[128px] md:right-8 z-40">
             <button type="button" onclick="handlePlusClick()" class="w-16 h-16 bg-indigo-600 hover:bg-indigo-700 active:scale-90 text-white rounded-full shadow-xl flex items-center justify-center text-2xl transition transform interactive-btn" title="新しい挑戦を書き込む">
                 <i class="fa-solid fa-plus"></i>
-            </button>
-        </div>
-    </div>
-
-    <!-- Account View (編集モード時のみ利用可能) -->
-    <div id="account-view" class="w-full h-full pt-20 pb-36 px-4 overflow-y-auto scrollable-list hidden">
-        <div class="max-w-xl mx-auto space-y-4">
-            <!-- Sub Tabs (オンラインのアカウント / ログインしたアカウント) -->
-            <div class="bg-white p-1.5 rounded-2xl shadow-sm border border-slate-200 grid grid-cols-2 gap-1.5">
-                <button type="button" id="subtab-online-btn" onclick="switchAccountSubTab('online')" class="py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn">
-                    <span>オンラインのアカウント</span>
-                    <span id="online-count-badge" class="text-[11px] bg-white/20 px-2 py-0.5 rounded-full">0</span>
-                </button>
-                <button type="button" id="subtab-logged-btn" onclick="switchAccountSubTab('logged')" class="py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 text-slate-600 hover:bg-slate-50 interactive-btn">
-                    <span>ログインしたアカウント</span>
-                    <span id="logged-count-badge" class="text-[11px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">0</span>
-                </button>
-            </div>
-
-            <!-- Online Users List -->
-            <div id="account-online-panel" class="space-y-2.5"></div>
-
-            <!-- Logged-in History Users List -->
-            <div id="account-logged-panel" class="space-y-2.5 hidden"></div>
-        </div>
-    </div>
-
-    <!-- Bottom Mode Tabs (編集モード時のみ表示) -->
-    <div id="bottom-mode-tabs" class="fixed bottom-11 md:bottom-12 left-1/2 -translate-x-1/2 z-40 pointer-events-auto hidden">
-        <div class="bg-white/95 backdrop-blur-md p-1.5 rounded-2xl shadow-xl border border-slate-200 flex items-center space-x-1">
-            <button type="button" id="main-tab-board" onclick="switchMainTab('board')" class="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition bg-indigo-600 text-white shadow-sm interactive-btn">
-                ボード
-            </button>
-            <button type="button" id="main-tab-account" onclick="switchMainTab('account')" class="px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-slate-600 hover:bg-slate-100 interactive-btn">
-                アカウント
             </button>
         </div>
     </div>
@@ -1014,9 +790,6 @@
         let noteStartX = 0, noteStartY = 0;
         let dragStartPointerX = 0, dragStartPointerY = 0;
         let hasInitializedView = false;
-
-        let currentMainTab = 'board';
-        let currentAccountSubTab = 'online';
 
         let monitorReturnTimeout = null;
         let monitorAutoInterval = null;
@@ -1361,238 +1134,8 @@
 
             closeHistoryDetailModal();
             closeHistoryModal();
-            if (currentMainTab !== 'board') switchMainTab('board');
             renderNotes();
             renderSearchList();
-        }
-
-        // メインタブ切り替え（ボード / アカウント：編集モード時のみ）
-        function switchMainTab(tab) {
-            if (tab === 'account' && !window.isAdminMode) return;
-            currentMainTab = tab;
-            const boardView = document.getElementById('board-view');
-            const accountView = document.getElementById('account-view');
-            const boardTopControls = document.getElementById('board-top-controls');
-            const tabBoardBtn = document.getElementById('main-tab-board');
-            const tabAccountBtn = document.getElementById('main-tab-account');
-
-            if (tab === 'board') {
-                boardView.classList.remove('hidden');
-                accountView.classList.add('hidden');
-                boardTopControls.classList.remove('hidden');
-
-                tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition bg-indigo-600 text-white shadow-sm interactive-btn';
-                tabAccountBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-slate-600 hover:bg-slate-100 interactive-btn';
-            } else {
-                boardView.classList.add('hidden');
-                accountView.classList.remove('hidden');
-                boardTopControls.classList.add('hidden');
-
-                tabAccountBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition bg-indigo-600 text-white shadow-sm interactive-btn';
-                tabBoardBtn.className = 'px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition text-slate-600 hover:bg-slate-100 interactive-btn';
-                renderAccountLists();
-            }
-            updateUserIconUI();
-        }
-
-        // アカウント画面のサブタブ切り替え（オンラインのアカウント / ログインしたアカウント）
-        function switchAccountSubTab(subTab) {
-            currentAccountSubTab = subTab;
-            const onlineBtn = document.getElementById('subtab-online-btn');
-            const loggedBtn = document.getElementById('subtab-logged-btn');
-            const onlinePanel = document.getElementById('account-online-panel');
-            const loggedPanel = document.getElementById('account-logged-panel');
-
-            if (subTab === 'online') {
-                onlinePanel.classList.remove('hidden');
-                loggedPanel.classList.add('hidden');
-
-                onlineBtn.className = 'py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn';
-                loggedBtn.className = 'py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 text-slate-600 hover:bg-slate-50 interactive-btn';
-            } else {
-                onlinePanel.classList.add('hidden');
-                loggedPanel.classList.remove('hidden');
-
-                loggedBtn.className = 'py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 bg-indigo-600 text-white shadow-sm interactive-btn';
-                onlineBtn.className = 'py-2.5 px-3 rounded-xl text-xs sm:text-sm font-bold transition flex items-center justify-center space-x-2 text-slate-600 hover:bg-slate-50 interactive-btn';
-            }
-            renderAccountLists();
-        }
-
-        function upsertAccountRecord(userMap, key, record) {
-            if (!key) return;
-            const prev = userMap.get(key) || {};
-            userMap.set(key, {
-                uid: prev.uid || record.uid || key,
-                displayName: record.displayName || prev.displayName || '名無しさん',
-                email: record.email || prev.email || '',
-                photoURL: record.photoURL || prev.photoURL || '',
-                isOnline: (typeof record.isOnline === 'boolean') ? record.isOnline : Boolean(prev.isOnline),
-                forceLogout: (typeof record.forceLogout === 'boolean') ? record.forceLogout : Boolean(prev.forceLogout),
-                lastLoginAt: record.lastLoginAt || prev.lastLoginAt || null,
-                lastActiveAt: record.lastActiveAt || prev.lastActiveAt || record.lastLoginAt || prev.lastLoginAt || null
-            });
-        }
-
-        function renderAccountLists() {
-            const onlinePanel = document.getElementById('account-online-panel');
-            const loggedPanel = document.getElementById('account-logged-panel');
-            const onlineBadge = document.getElementById('online-count-badge');
-            const loggedBadge = document.getElementById('logged-count-badge');
-            if (!onlinePanel || !loggedPanel) return;
-
-            const userMap = new Map();
-
-            (window.loginSessions || []).forEach(u => {
-                if (!u) return;
-                const key = u.uid || u.email || u.displayName;
-                upsertAccountRecord(userMap, key, u);
-            });
-
-            (window.notesData || []).forEach(n => {
-                if (!n) return;
-                const key = n.creatorId || n.userEmail || n.userName || n.author;
-                if (!key) return;
-                upsertAccountRecord(userMap, key, {
-                    uid: n.creatorId || key,
-                    displayName: n.userName || n.author || 'ユーザー',
-                    email: n.userEmail || '',
-                    photoURL: n.userPhoto || '',
-                    isOnline: false,
-                    lastLoginAt: n.createdAt || null,
-                    lastActiveAt: n.updatedAt || n.createdAt || null
-                });
-            });
-
-            (window.auditLogsData || []).forEach(l => {
-                if (!l) return;
-                const key = l.actorUid || l.actorEmail || l.actorName;
-                if (!key) return;
-                upsertAccountRecord(userMap, key, {
-                    uid: l.actorUid || key,
-                    displayName: l.actorName || 'ユーザー',
-                    email: l.actorEmail || '',
-                    photoURL: '',
-                    isOnline: false,
-                    lastLoginAt: l.timestamp || null,
-                    lastActiveAt: l.timestamp || null
-                });
-            });
-
-            (window.usersData || []).forEach(u => {
-                if (!u) return;
-                const key = u.uid || u.email || u.displayName;
-                upsertAccountRecord(userMap, key, u);
-            });
-
-            if (window.currentUser && window.currentUser.uid && !isUidForceLoggedOut(window.currentUser.uid)) {
-                const key = window.currentUser.uid;
-                upsertAccountRecord(userMap, key, {
-                    ...window.currentUser,
-                    isOnline: true,
-                    forceLogout: false,
-                    lastActiveAt: new Date().toISOString()
-                });
-            }
-
-            const nowMs = Date.now();
-            const allUsers = Array.from(userMap.values()).map(u => {
-                const forcedOut = Boolean(u.forceLogout || isUidForceLoggedOut(u.uid));
-                const lastActiveMs = u.lastActiveAt ? new Date(u.lastActiveAt).getTime() : 0;
-                const isRecentlyActive = lastActiveMs > 0 && (nowMs - lastActiveMs) < 90000;
-                const isSelf = Boolean(window.currentUser && u.uid === window.currentUser.uid && !forcedOut);
-                return {
-                    ...u,
-                    effectivelyOnline: Boolean(!forcedOut && (isSelf || (u.isOnline && isRecentlyActive)))
-                };
-            });
-
-            allUsers.sort((a, b) => {
-                const ta = a.lastActiveAt ? new Date(a.lastActiveAt).getTime() : (a.lastLoginAt ? new Date(a.lastLoginAt).getTime() : 0);
-                const tb = b.lastActiveAt ? new Date(b.lastActiveAt).getTime() : (b.lastLoginAt ? new Date(b.lastLoginAt).getTime() : 0);
-                return tb - ta;
-            });
-
-            const onlineUsers = allUsers.filter(u => u.effectivelyOnline);
-
-            if (onlineBadge) onlineBadge.innerText = onlineUsers.length;
-            if (loggedBadge) loggedBadge.innerText = allUsers.length;
-
-            if (onlineUsers.length === 0) {
-                onlinePanel.innerHTML = `
-                    <div class="bg-white rounded-3xl border border-slate-200 p-8 text-center text-slate-400">
-                        <i class="fa-solid fa-user-clock text-2xl mb-2 block"></i>
-                        <p class="text-xs">現在オンラインのアカウントはありません</p>
-                    </div>
-                `;
-            } else {
-                onlinePanel.innerHTML = onlineUsers.map(u => createAccountCardHtml(u, false)).join('');
-            }
-
-            if (allUsers.length === 0) {
-                loggedPanel.innerHTML = `
-                    <div class="bg-white rounded-3xl border border-slate-200 p-8 text-center text-slate-400">
-                        <i class="fa-regular fa-address-book text-2xl mb-2 block"></i>
-                        <p class="text-xs">ログインしたアカウントはまだありません</p>
-                    </div>
-                `;
-            } else {
-                loggedPanel.innerHTML = allUsers.map(u => createAccountCardHtml(u, true)).join('');
-            }
-        }
-
-        function createAccountCardHtml(user, showTrashButton) {
-            const isSelf = Boolean(window.currentUser && user.uid === window.currentUser.uid && user.effectivelyOnline);
-            const displayName = user.displayName || user.email || '名無しさん';
-            const initial = displayName[0] || 'U';
-            const avatarHtml = user.photoURL
-                ? `<img src="${user.photoURL}" class="w-11 h-11 rounded-full object-cover border border-slate-200 shrink-0">`
-                : `<div class="w-11 h-11 rounded-full bg-indigo-600 text-white flex items-center justify-center font-bold text-sm shrink-0">${escapeHtml(initial)}</div>`;
-
-            const statusDot = user.effectivelyOnline
-                ? `<span class="w-3 h-3 rounded-full bg-emerald-500 ring-2 ring-white absolute bottom-0 right-0"></span>`
-                : `<span class="w-3 h-3 rounded-full bg-slate-300 ring-2 ring-white absolute bottom-0 right-0"></span>`;
-
-            const dateSource = user.lastLoginAt || user.lastActiveAt;
-            const timeLabel = dateSource
-                ? `最終ログイン: ${new Date(dateSource).toLocaleString('ja-JP', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`
-                : 'ログイン履歴あり';
-
-            const emailLine = (window.isAdminMode && user.email)
-                ? `<p class="text-[11px] text-slate-400 truncate">${escapeHtml(user.email)}</p>`
-                : '';
-
-            const trashBtnHtml = (showTrashButton && window.isAdminMode && user.uid)
-                ? `<button type="button" onclick="event.stopPropagation(); kickAccountToReLogin('${escapeHtml(user.uid)}', '${escapeHtml(displayName)}')" class="w-9 h-9 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-600 flex items-center justify-center transition active:scale-95 interactive-btn shrink-0" title="ログアウトさせる（再ログインが必要）">
-                        <i class="fa-solid fa-trash-can text-xs"></i>
-                   </button>`
-                : '';
-
-            return `
-                <div class="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between gap-3">
-                    <div class="flex items-center space-x-3 min-w-0">
-                        <div class="relative shrink-0">
-                            ${avatarHtml}
-                            ${statusDot}
-                        </div>
-                        <div class="min-w-0">
-                            <div class="flex items-center space-x-1.5">
-                                <p class="font-bold text-slate-800 text-xs sm:text-sm truncate">${escapeHtml(displayName)}</p>
-                                ${isSelf ? '<span class="text-[10px] bg-indigo-50 text-indigo-600 px-2 py-0.5 rounded-full font-bold shrink-0">あなた</span>' : ''}
-                            </div>
-                            ${emailLine}
-                            <p class="text-[11px] text-slate-400 truncate">${timeLabel}</p>
-                        </div>
-                    </div>
-                    <div class="flex items-center space-x-2 shrink-0">
-                        ${user.effectivelyOnline
-                            ? '<span class="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full">オンライン</span>'
-                            : '<span class="text-[11px] font-semibold text-slate-400 bg-slate-100 px-2.5 py-1 rounded-full">オフライン</span>'
-                        }
-                        ${trashBtnHtml}
-                    </div>
-                </div>
-            `;
         }
 
         function initCanvas() {
@@ -1853,7 +1396,6 @@
             if ((!hasInitializedView && window.notesData.length > 0) || (window.isMonitorMode && !monitorSpotlightNoteId)) {
                 fitAllNotes(window.isMonitorMode);
             }
-            if (typeof renderAccountLists === 'function') renderAccountLists();
         }
 
         function openAdminDetailModalForNote(noteId) {
@@ -2051,7 +1593,6 @@
             if (!note) return;
 
             closeSearchModal();
-            if (currentMainTab !== 'board') switchMainTab('board');
             const viewport = document.getElementById('viewport');
             if (!viewport) return;
 
